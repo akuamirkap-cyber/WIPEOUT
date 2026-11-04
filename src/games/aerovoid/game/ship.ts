@@ -1,0 +1,542 @@
+import * as THREE from 'three';
+
+export interface Team {
+  name: string;
+  primary: number;
+  secondary: number;
+  glow: number;
+}
+
+export const TEAMS: Team[] = [
+  { name: 'AURORA', primary: 0x1f6fe0, secondary: 0xffd21a, glow: 0x3fd0ff },
+  { name: 'VANTA', primary: 0x20242a, secondary: 0xff3b30, glow: 0xff4a3a },
+  { name: 'KORIN', primary: 0xe8edf2, secondary: 0x14d6b0, glow: 0x2affd4 },
+  { name: 'SOLARIS', primary: 0xff7a1a, secondary: 0x1b1f2a, glow: 0xffa640 },
+  { name: 'NOVA', primary: 0x7b3ff0, secondary: 0xff4fd8, glow: 0xc07bff },
+  { name: 'VERDANT', primary: 0x2fa84f, secondary: 0xf2f6f0, glow: 0x6dff8a },
+  { name: 'CRIMSON', primary: 0xc4262e, secondary: 0xf4f4f4, glow: 0xff6a6a },
+  { name: 'STRATUS', primary: 0x8a97a6, secondary: 0x2b6bff, glow: 0x6fb5ff },
+];
+
+const flameVert = /* glsl */ `
+varying vec2 vUv;
+varying vec3 vN;
+varying vec3 vV;
+void main(){
+  vUv = uv;
+  vN = normalize(normalMatrix * normal);
+  vec4 mv = modelViewMatrix * vec4(position,1.0);
+  vV = normalize(-mv.xyz);
+  gl_Position = projectionMatrix * mv;
+}`;
+const flameFrag = /* glsl */ `
+uniform float uTime;
+uniform float uBoost;
+uniform float uPower;
+uniform vec3 uGlow;
+uniform float uCore;
+varying vec2 vUv;
+varying vec3 vN;
+varying vec3 vV;
+void main(){
+  float t = vUv.y;
+  float fall = pow(clamp(1.0 - t, 0.0, 1.0), 1.4);
+  float n = 0.78 + 0.22 * sin(uTime * 70.0 - t * 28.0 + vUv.x * 40.0);
+  n *= 0.85 + 0.15 * sin(uTime * 41.0 + t * 11.0);
+  float f = pow(abs(dot(normalize(vN), normalize(vV))), 1.1);
+  vec3 cold = mix(uGlow, vec3(0.55,0.85,1.0), 0.35);
+  vec3 hot = mix(vec3(1.0,0.28,0.05), vec3(1.0,0.75,0.25), uCore);
+  vec3 col = mix(cold, hot, uBoost);
+  col = mix(col, vec3(1.0,0.95,0.85), uCore * (1.0 - t) * 0.8);
+  float a = f * fall * n * uPower;
+  gl_FragColor = vec4(col * (1.25 + uBoost * 0.85), a);
+}`;
+
+function glowTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d')!;
+  const gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(255,255,255,1)');
+  gr.addColorStop(0.25, 'rgba(255,255,255,0.45)');
+  gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr;
+  g.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+let _glowTex: THREE.Texture | null = null;
+const getGlowTex = () => (_glowTex ??= glowTexture());
+
+export interface Ship {
+  group: THREE.Group;
+  setFlame(power: number, boost: number, time: number): void;
+  nozzles: THREE.Vector3[];
+  glowColor: THREE.Color;
+}
+
+/* ---------------------------------------------------------------- geometry helpers */
+
+interface Ring {
+  z: number;
+  w: number;
+  h: number;
+  cy: number;
+}
+
+/** smooth lofted body: elliptical rings swept along +Z, capped at both ends */
+function loft(rings: Ring[], radial = 32): THREE.BufferGeometry {
+  const pos: number[] = [];
+  const nor: number[] = [];
+  const uv: number[] = [];
+  const idx: number[] = [];
+  const n = rings.length;
+  for (let i = 0; i < n; i++) {
+    const r = rings[i];
+    for (let j = 0; j <= radial; j++) {
+      const a = (j / radial) * Math.PI * 2;
+      const x = Math.cos(a) * r.w;
+      const y = r.cy + Math.sin(a) * r.h;
+      pos.push(x, y, r.z);
+      // analytic normal for an ellipse of revolution
+      const nx = Math.cos(a) / Math.max(r.w, 1e-4);
+      const ny = Math.sin(a) / Math.max(r.h, 1e-4);
+      const l = Math.hypot(nx, ny) || 1;
+      nor.push(nx / l, ny / l, 0);
+      uv.push(j / radial, i / (n - 1));
+    }
+  }
+  for (let i = 0; i < n - 1; i++)
+    for (let j = 0; j < radial; j++) {
+      const a = i * (radial + 1) + j;
+      const b = a + radial + 1;
+      idx.push(a, b, a + 1, b, b + 1, a + 1);
+    }
+  // caps
+  const cap = (i: number, front: boolean) => {
+    const c = pos.length / 3;
+    const r = rings[i];
+    pos.push(0, r.cy, r.z);
+    nor.push(0, 0, front ? -1 : 1);
+    uv.push(0.5, front ? 0 : 1);
+    const base = i * (radial + 1);
+    for (let j = 0; j < radial; j++) {
+      if (front) idx.push(c, base + j + 1, base + j);
+      else idx.push(c, base + j, base + j + 1);
+    }
+  };
+  cap(0, true);
+  cap(n - 1, false);
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  g.setIndex(idx);
+  return g;
+}
+
+/** flat planform extruded upward (shape x = lateral, shape y = -forwardZ) */
+function plate(shape: THREE.Shape, thick = 0.12, bevel = 0.035) {
+  const g = new THREE.ExtrudeGeometry(shape, {
+    depth: thick,
+    bevelEnabled: true,
+    bevelSize: bevel,
+    bevelThickness: bevel,
+    bevelSegments: 2,
+    curveSegments: 16,
+  });
+  g.rotateX(-Math.PI / 2);
+  return g;
+}
+
+/** vertical fin: shape x = forwardZ, shape y = height, thickness along lateral */
+function fin(f: THREE.Shape, thick = 0.05) {
+  const g = new THREE.ExtrudeGeometry(f, { depth: thick, bevelEnabled: true, bevelSize: 0.012, bevelThickness: 0.012, bevelSegments: 1, curveSegments: 8 });
+  g.rotateY(-Math.PI / 2);
+  g.translate(thick / 2, 0, 0);
+  return g;
+}
+
+/* ---------------------------------------------------------------- ship */
+
+export function createShip(team: Team): Ship {
+  const group = new THREE.Group();
+  const body = new THREE.MeshStandardMaterial({
+    color: team.primary,
+    metalness: 0.62,
+    roughness: 0.2,
+    envMapIntensity: 1.7,
+  });
+  const accent = new THREE.MeshStandardMaterial({
+    color: team.secondary,
+    metalness: 0.45,
+    roughness: 0.24,
+    envMapIntensity: 1.5,
+  });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x0c1016, metalness: 0.88, roughness: 0.26, envMapIntensity: 1.5 });
+  const chrome = new THREE.MeshStandardMaterial({ color: 0xcfd8e2, metalness: 1, roughness: 0.1, envMapIntensity: 1.9 });
+  const glass = new THREE.MeshPhysicalMaterial({
+    color: 0x05080d,
+    metalness: 0.55,
+    roughness: 0.03,
+    clearcoat: 1,
+    clearcoatRoughness: 0.02,
+    envMapIntensity: 2.4,
+  });
+  const glowCol = new THREE.Color(team.glow);
+  const glowBasic = new THREE.MeshBasicMaterial({ color: glowCol.clone().multiplyScalar(1.35), toneMapped: false });
+  const whiteBasic = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.8, 1.85, 2.0), toneMapped: false });
+
+  const add = (geo: THREE.BufferGeometry, mat: THREE.Material, x = 0, y = 0, z = 0, cast = true) => {
+    const m = new THREE.Mesh(geo, mat);
+    m.position.set(x, y, z);
+    m.castShadow = cast;
+    m.receiveShadow = true;
+    group.add(m);
+    return m;
+  };
+
+  /* ---- hull: clean teardrop with raised spine ---- */
+  const hull = loft(
+    [
+      { z: 4.45, w: 0.04, h: 0.03, cy: 0.0 },
+      { z: 4.0, w: 0.2, h: 0.11, cy: 0.0 },
+      { z: 3.35, w: 0.4, h: 0.21, cy: 0.02 },
+      { z: 2.5, w: 0.56, h: 0.3, cy: 0.04 },
+      { z: 1.5, w: 0.66, h: 0.36, cy: 0.06 },
+      { z: 0.3, w: 0.7, h: 0.39, cy: 0.07 },
+      { z: -1.0, w: 0.62, h: 0.35, cy: 0.06 },
+      { z: -2.2, w: 0.5, h: 0.29, cy: 0.05 },
+      { z: -2.95, w: 0.36, h: 0.2, cy: 0.03 },
+      { z: -3.25, w: 0.16, h: 0.09, cy: 0.02 },
+    ],
+    36
+  );
+  add(hull, body);
+
+  // dark underbelly plate
+  const belly = loft(
+    [
+      { z: 3.5, w: 0.22, h: 0.06, cy: -0.16 },
+      { z: 2.5, w: 0.5, h: 0.1, cy: -0.24 },
+      { z: 1.0, w: 0.58, h: 0.11, cy: -0.27 },
+      { z: -1.2, w: 0.5, h: 0.1, cy: -0.24 },
+      { z: -2.7, w: 0.3, h: 0.07, cy: -0.16 },
+    ],
+    24
+  );
+  add(belly, dark);
+
+  // canopy
+  const canopy = loft(
+    [
+      { z: 2.0, w: 0.16, h: 0.05, cy: 0.34 },
+      { z: 1.35, w: 0.3, h: 0.15, cy: 0.42 },
+      { z: 0.5, w: 0.35, h: 0.18, cy: 0.45 },
+      { z: -0.35, w: 0.29, h: 0.14, cy: 0.38 },
+      { z: -1.0, w: 0.16, h: 0.05, cy: 0.26 },
+    ],
+    28
+  );
+  add(canopy, glass, 0, 0, 0, false);
+  // canopy base trim
+  const trim = add(new THREE.TorusGeometry(0.36, 0.02, 6, 40), dark, 0, 0.42, 0.45, false);
+  trim.scale.set(1, 1, 2.6);
+  trim.rotation.x = Math.PI / 2;
+
+  // dorsal spine (team accent)
+  add(loft(
+    [
+      { z: 1.1, w: 0.1, h: 0.04, cy: 0.45 },
+      { z: 0.2, w: 0.12, h: 0.05, cy: 0.48 },
+      { z: -1.4, w: 0.1, h: 0.04, cy: 0.42 },
+      { z: -2.6, w: 0.06, h: 0.03, cy: 0.28 },
+    ],
+    12
+  ), accent, 0, 0, 0, false);
+
+  /* ---- wings ---- */
+  const wingShape = new THREE.Shape();
+  wingShape.moveTo(0.42, -1.9);
+  wingShape.bezierCurveTo(1.5, -1.8, 2.25, -1.14, 2.66, -0.26);
+  wingShape.lineTo(2.66, 0.46);
+  wingShape.bezierCurveTo(2.05, 0.62, 1.25, 1.28, 0.42, 2.2);
+  wingShape.closePath();
+  const wingGeo = plate(wingShape, 0.11, 0.035);
+
+  const stripe = new THREE.Shape();
+  stripe.moveTo(0.54, -1.78);
+  stripe.bezierCurveTo(1.55, -1.68, 2.22, -1.06, 2.6, -0.28);
+  stripe.lineTo(2.6, 0.06);
+  stripe.bezierCurveTo(2.05, -0.62, 1.5, -1.2, 0.68, -1.42);
+  stripe.closePath();
+  const stripeGeo = plate(stripe, 0.02, 0.008);
+
+  const tipFin = new THREE.Shape();
+  tipFin.moveTo(0.75, 0);
+  tipFin.lineTo(-1.15, 0);
+  tipFin.lineTo(-1.75, 0.72);
+  tipFin.lineTo(-1.35, 0.78);
+  tipFin.lineTo(0.55, 0.16);
+  tipFin.closePath();
+  const tipFinGeo = fin(tipFin, 0.05);
+
+  for (const sx of [1, -1]) {
+    const w = add(wingGeo, body);
+    w.scale.x = sx;
+    w.position.y = -0.12;
+    const s = add(stripeGeo, accent, 0, 0.04, 0);
+    s.scale.x = sx;
+    s.position.y = 0.0;
+    const tf = add(tipFinGeo, accent, sx * 2.58, -0.04, 0.3);
+    tf.scale.setScalar(0.86);
+    tf.scale.x = sx * 0.86;
+    tf.rotation.z = -sx * 0.28;
+    // wing tip light
+    add(new THREE.BoxGeometry(0.05, 0.03, 0.45), glowBasic, sx * 2.64, 0.0, 0.16, false);
+    // leading-edge light strip
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.012, 0.03), glowBasic);
+    leg.position.set(0, 0.03, 0);
+    leg.rotation.y = sx * 0.72;
+    leg.position.z = 0.35;
+    leg.position.x = sx * 1.45;
+    leg.scale.x = 0.7;
+    group.add(leg);
+  }
+
+  /* ---- engine nacelles ---- */
+  const nozzles: THREE.Vector3[] = [];
+  const nacelleGeo = loft(
+    [
+      { z: 2.7, w: 0.07, h: 0.06, cy: 0 },
+      { z: 2.3, w: 0.26, h: 0.23, cy: 0 },
+      { z: 1.7, w: 0.36, h: 0.32, cy: 0 },
+      { z: 0.6, w: 0.4, h: 0.35, cy: 0 },
+      { z: -0.8, w: 0.38, h: 0.33, cy: 0 },
+      { z: -2.0, w: 0.32, h: 0.28, cy: 0 },
+      { z: -2.65, w: 0.27, h: 0.24, cy: 0 },
+    ],
+    28
+  );
+  const intakeGeo = new THREE.TorusGeometry(0.28, 0.045, 10, 32);
+  const nozzleGeo = new THREE.CircleGeometry(0.24, 24);
+  nozzleGeo.rotateY(Math.PI);
+  const innerNozzle = new THREE.CircleGeometry(0.09, 20);
+  innerNozzle.rotateY(Math.PI);
+  for (const sx of [1, -1]) {
+    const x = sx * 1.32;
+    add(nacelleGeo, body, x, -0.02, 0).scale.set(0.86, 0.86, 1);
+    add(intakeGeo, chrome, x, -0.02, 2.28, false).scale.setScalar(0.86);
+    add(new THREE.CircleGeometry(0.26, 24), dark, x, -0.02, 2.28, false).scale.setScalar(0.86);
+    add(new THREE.CircleGeometry(0.2, 24), glowBasic, x, -0.02, 2.3, false).scale.setScalar(0.7);
+    add(nozzleGeo, dark, x, -0.02, -2.66, false).scale.setScalar(0.86);
+    add(innerNozzle, glowBasic, x, -0.02, -2.67, false).scale.setScalar(0.6);
+    add(new THREE.BoxGeometry(0.12, 0.02, 2.0), accent, x, 0.27, -0.3, false);
+    add(new THREE.BoxGeometry(0.1, 0.025, 1.3), glowBasic, x, -0.33, -0.6, false);
+    nozzles.push(new THREE.Vector3(x, -0.02, -2.8));
+  }
+  // centre thruster
+  add(loft(
+    [
+      { z: 0.3, w: 0.16, h: 0.14, cy: -0.05 },
+      { z: -0.6, w: 0.2, h: 0.17, cy: -0.05 },
+      { z: -2.5, w: 0.17, h: 0.15, cy: -0.05 },
+    ],
+    18
+  ), dark, 0, 0, 0);
+  add(new THREE.CircleGeometry(0.1, 20).rotateY(Math.PI), glowBasic, 0, -0.05, -2.52, false).scale.setScalar(0.7);
+  nozzles.push(new THREE.Vector3(0, -0.05, -2.6));
+
+  /* ---- tail fins ---- */
+  const finShape = new THREE.Shape();
+  finShape.moveTo(1.3, 0);
+  finShape.lineTo(-1.4, 0);
+  finShape.lineTo(-2.0, 1.05);
+  finShape.lineTo(-1.55, 1.1);
+  finShape.lineTo(0.9, 0.24);
+  finShape.closePath();
+  const finGeo = fin(finShape, 0.05);
+  for (const sx of [1, -1]) {
+    const f = add(finGeo, body, sx * 0.42, 0.18, 0);
+    f.scale.x = sx;
+    f.rotation.z = -sx * 0.26;
+    add(new THREE.BoxGeometry(0.04, 0.05, 0.5), glowBasic, sx * 0.72, 1.18, 2.5, false).rotation.z = -sx * 0.26;
+  }
+  // centre dorsal fin
+  const dfin = add(finGeo, accent, 0, 0.26, -0.2);
+  dfin.scale.set(0.6, 0.72, 0.72);
+
+  /* ---- details ---- */
+  // side intakes
+  for (const sx of [1, -1]) {
+    const intake = add(new THREE.SphereGeometry(0.2, 16, 12), dark, sx * 0.5, 0.12, 1.05, false);
+    intake.scale.set(0.7, 0.55, 1.9);
+    add(new THREE.BoxGeometry(0.03, 0.05, 0.5), glowBasic, sx * 0.58, 0.2, 0.95, false);
+  }
+  // nose light + sensors
+  add(new THREE.BoxGeometry(0.34, 0.035, 0.05), whiteBasic, 0, 0.12, 3.94, false);
+  add(new THREE.BoxGeometry(0.08, 0.02, 0.3), accent, 0, 0.2, 3.5, false);
+  add(new THREE.SphereGeometry(0.05, 10, 8), glowBasic, 0, 0.16, 3.98, false);
+
+  /* ---- flames ---- */
+  const flameGeo = new THREE.ConeGeometry(0.3, 1, 18, 1, true);
+  flameGeo.rotateX(-Math.PI / 2);
+  flameGeo.translate(0, 0, -0.5);
+  const flames: { outer: THREE.Mesh; inner: THREE.Mesh; base: number }[] = [];
+  const mkFlame = (core: number) =>
+    new THREE.ShaderMaterial({
+      vertexShader: flameVert,
+      fragmentShader: flameFrag,
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      fog: false,
+      uniforms: {
+        uTime: { value: 0 },
+        uBoost: { value: 0 },
+        uPower: { value: 0 },
+        uCore: { value: core },
+        uGlow: { value: glowCol.clone() },
+      },
+    });
+  const glowSprites: THREE.Sprite[] = [];
+  nozzles.forEach((n, i) => {
+    const base = i === 2 ? 0.8 : 1;
+    const outer = new THREE.Mesh(flameGeo, mkFlame(0));
+    outer.position.copy(n);
+    outer.frustumCulled = false;
+    outer.renderOrder = 5;
+    const inner = new THREE.Mesh(flameGeo, mkFlame(1));
+    inner.position.copy(n);
+    inner.frustumCulled = false;
+    inner.renderOrder = 6;
+    group.add(outer, inner);
+    flames.push({ outer, inner, base });
+    const sp = new THREE.Sprite(
+      new THREE.SpriteMaterial({ map: getGlowTex(), color: glowCol, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true, fog: false })
+    );
+    sp.position.copy(n);
+    group.add(sp);
+    glowSprites.push(sp);
+  });
+
+  const under = new THREE.Mesh(
+    new THREE.PlaneGeometry(5.0, 6.8),
+    new THREE.MeshBasicMaterial({
+      map: getGlowTex(),
+      color: glowCol.clone(),
+      transparent: true,
+      opacity: 0.14,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      fog: false,
+    })
+  );
+  under.rotation.x = -Math.PI / 2;
+  under.position.set(0, -0.62, -0.2);
+  under.renderOrder = 3;
+  group.add(under);
+
+  const tmpC = new THREE.Color();
+  const setFlame = (power: number, boost: number, time: number) => {
+    flames.forEach((f, i) => {
+      const flick = 0.92 + 0.08 * Math.sin(time * 55 + i * 2);
+      // Keep the exhaust behind the ship but short of the chase camera, even under full NOS.
+      const len = (1.7 + power * 2.5 + boost * 5.2) * f.base * flick;
+      const wid = (0.7 + power * 0.3 + boost * 0.5) * f.base;
+      f.outer.scale.set(wid, wid, len);
+      f.inner.scale.set(wid * 0.5, wid * 0.5, len * 0.62);
+      for (const m of [f.outer, f.inner]) {
+        const u = (m.material as THREE.ShaderMaterial).uniforms;
+        u.uTime.value = time;
+        u.uBoost.value = boost;
+        u.uPower.value = 0.35 + power * 0.65;
+      }
+    });
+    glowSprites.forEach((s) => {
+      const sc = 0.5 + power * 0.35 + boost * 2.6;
+      s.scale.set(sc, sc, 1);
+      tmpC.copy(glowCol).lerp(new THREE.Color(1, 0.35, 0.08), boost);
+      (s.material as THREE.SpriteMaterial).color.copy(tmpC).multiplyScalar(0.4 + boost * 0.45);
+    });
+    (under.material as THREE.MeshBasicMaterial).opacity = 0.1 + power * 0.1 + boost * 0.22;
+  };
+
+  return { group, setFlame, nozzles: nozzles.slice(0, 2), glowColor: glowCol };
+}
+
+/** Light ribbon trail */
+export class Trail {
+  mesh: THREE.Mesh;
+  private pts: THREE.Vector3[] = [];
+  private ws: THREE.Vector3[] = [];
+  private pos: Float32Array;
+  private col: Float32Array;
+  private geo = new THREE.BufferGeometry();
+  private base = new THREE.Color();
+  static MAXP = 30;
+
+  constructor(color: THREE.Color) {
+    const M = Trail.MAXP;
+    this.pos = new Float32Array(M * 2 * 3);
+    this.col = new Float32Array(M * 2 * 3);
+    for (let i = 0; i < M; i++) {
+      this.pts.push(new THREE.Vector3());
+      this.ws.push(new THREE.Vector3());
+    }
+    const idx: number[] = [];
+    for (let i = 0; i < M - 1; i++) {
+      const a = i * 2;
+      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+    this.geo.setIndex(idx);
+    this.geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage));
+    this.geo.setAttribute('color', new THREE.BufferAttribute(this.col, 3).setUsage(THREE.DynamicDrawUsage));
+    this.base.copy(color);
+    this.mesh = new THREE.Mesh(
+      this.geo,
+      new THREE.MeshBasicMaterial({
+        vertexColors: true,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+        fog: false,
+      })
+    );
+    this.mesh.frustumCulled = false;
+    this.mesh.renderOrder = 4;
+  }
+
+  reset(p: THREE.Vector3) {
+    for (const q of this.pts) q.copy(p);
+  }
+
+  push(p: THREE.Vector3, w: THREE.Vector3, intensity: number, boost: number, color?: THREE.Color) {
+    const M = Trail.MAXP;
+    for (let i = M - 1; i > 0; i--) {
+      this.pts[i].copy(this.pts[i - 1]);
+      this.ws[i].copy(this.ws[i - 1]);
+    }
+    this.pts[0].copy(p);
+    this.ws[0].copy(w);
+    const c = color ?? this.base;
+    const width = 0.16 + boost * 0.34;
+    for (let i = 0; i < M; i++) {
+      const fade = Math.pow(1 - i / (M - 1), 1.6) * intensity;
+      const q = this.pts[i];
+      const ww = this.ws[i];
+      const wd = width * (1 - (i / M) * 0.4);
+      this.pos.set([q.x - ww.x * wd, q.y - ww.y * wd, q.z - ww.z * wd, q.x + ww.x * wd, q.y + ww.y * wd, q.z + ww.z * wd], i * 6);
+      const r = c.r * fade * 1.6,
+        g = c.g * fade * 1.6,
+        b = c.b * fade * 1.6;
+      this.col.set([r, g, b, r, g, b], i * 6);
+    }
+    this.geo.attributes.position.needsUpdate = true;
+    this.geo.attributes.color.needsUpdate = true;
+  }
+}

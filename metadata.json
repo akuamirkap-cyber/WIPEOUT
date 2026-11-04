@@ -1,0 +1,6 @@
+{
+  "name": "Wipeout Anti-Gravity 3D Racing Trilogy",
+  "description": "Koleksi 3 game balap anti-gravity 3D futuristik: Aerovoid, Aether Rift, dan Velocity dengan menu pilihan game interaktif.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
