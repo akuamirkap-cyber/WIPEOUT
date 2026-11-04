@@ -347,7 +347,7 @@ export class Cockpit {
     const panelFlat = new THREE.MeshStandardMaterial({ map: panelTextures(), metalness: 0.75, roughness: 0.42, envMapIntensity: 1.25 });
     const darkMetal = new THREE.MeshStandardMaterial({ color: 0x10151b, metalness: 0.9, roughness: 0.28, envMapIntensity: 1.4 });
     const strutMat = new THREE.MeshStandardMaterial({ color: 0x07090c, metalness: 0.92, roughness: 0.3, envMapIntensity: 1.6 });
-    const glowMat = new THREE.MeshBasicMaterial({ color: this.glow.clone().multiplyScalar(2.0), toneMapped: false, side: THREE.DoubleSide });
+    const glowMat = new THREE.MeshBasicMaterial({ color: this.glow.clone().multiplyScalar(1.15), toneMapped: false, side: THREE.DoubleSide });
     this.glowMats.push(glowMat);
     const primary = new THREE.MeshStandardMaterial({ color: 0x1f6fe0, metalness: 0.6, roughness: 0.28, envMapIntensity: 1.6, side: THREE.DoubleSide });
     this.primaryMats.push(primary);
@@ -500,24 +500,17 @@ export class Cockpit {
     const T = (pts: [number, number][], r0: number, r1: number, seg = 56) =>
       frame.add(new THREE.Mesh(taperTube(pts.map(([x, y]) => dome(x, y)), r0, r1, seg, 8), strutMat));
 
-    const A: [number, number] = [-0.17, 0.36];
-    const B: [number, number] = [0.27, 0.16];
-
-    // short arc joining the two junctions (bulges upward)
-    T([A, [-0.01, 0.375], [0.15, 0.315], B], 0.0042, 0.0042, 48);
-    // A -> up to the top-left
-    T([A, [-0.24, 0.6], [-0.33, 0.84], [-0.42, 1.0], [-0.47, 1.12]], 0.0052, 0.0075, 40);
-    // B -> long strut up to the top-right (gets heavier toward the edge)
-    T([B, [0.46, 0.375], [0.69, 0.7], [0.9, 1.0], [0.96, 1.1]], 0.0058, 0.0125, 48);
-    // A -> down to the dashboard
-    T([A, [-0.17, 0.0], [-0.16, -0.5], [-0.14, -1.0]], 0.0052, 0.0105, 40);
-    // B -> down to the dashboard
-    T([B, [0.224, -0.25], [0.185, -0.725], [0.15, -1.0]], 0.0052, 0.0105, 40);
-
-    for (const [x, y] of [A, B]) {
-      const j = new THREE.Mesh(new THREE.SphereGeometry(0.0105, 16, 12), strutMat);
-      j.position.copy(dome(x, y));
-      frame.add(j);
+    // One side defines the canopy; mirroring the same points keeps both
+    // curves, thickness and junction heights exactly symmetrical.
+    const junction: [number, number] = [0.24, 0.23];
+    T([[-junction[0], junction[1]], [-0.12, 0.31], [0, 0.34], [0.12, 0.31], junction], 0.0045, 0.0045, 56);
+    for (const side of [-1, 1]) {
+      const mirror = (points: [number, number][]): [number, number][] => points.map(([x, y]) => [x * side, y]);
+      T(mirror([junction, [0.38, 0.45], [0.56, 0.7], [0.75, 0.97], [0.84, 1.12]]), 0.0055, 0.009, 48);
+      T(mirror([junction, [0.23, -0.15], [0.19, -0.57], [0.15, -1.0]]), 0.0052, 0.009, 40);
+      const joint = new THREE.Mesh(new THREE.SphereGeometry(0.0105, 16, 12), strutMat);
+      joint.position.copy(dome(side * junction[0], junction[1]));
+      frame.add(joint);
     }
     this.root.add(frame);
 
@@ -530,7 +523,7 @@ export class Cockpit {
         color: 0x000000,
         metalness: 0,
         roughness: 0.04,
-        envMapIntensity: 0.55,
+        envMapIntensity: 0.22,
         side: THREE.BackSide,
         transparent: true,
         blending: THREE.AdditiveBlending,
@@ -561,7 +554,7 @@ export class Cockpit {
           void main(){
             float f = pow(1.0 - abs(dot(normalize(vN), normalize(vV))), 2.4);
             float top = smoothstep(0.05, 0.95, normalize(vP).y);
-            float a = 0.008 + f * 0.16 + top * 0.04;
+            float a = 0.006 + f * 0.09 + top * 0.02;
             vec3 c = mix(uTint * 0.7, vec3(0.7, 0.95, 1.0), f * 0.8);
             gl_FragColor = vec4(c, a);
           }`,
@@ -601,7 +594,7 @@ export class Cockpit {
   setTeam(team: Team) {
     this.glow.set(team.glow);
     this.primaryMats.forEach((m) => m.color.set(team.primary));
-    this.glowMats.forEach((m) => m.color.copy(this.glow).multiplyScalar(2.0));
+    this.glowMats.forEach((m) => m.color.copy(this.glow).multiplyScalar(1.15));
     this.accentCss = '#' + new THREE.Color(team.glow).getHexString();
     if (this.last) this.draw(this.last, true);
   }
@@ -639,7 +632,7 @@ export class Cockpit {
     this.scene.environmentRotation.set(this.envE.x, this.envE.y, this.envE.z, 'XYZ');
     const facing = Math.max(0, -sunDirView.z);
     const glare = THREE.MathUtils.smoothstep(facing, 0.45, 0.97);
-    this.dirtMat.color.setScalar(0.26 + glare * 0.95);
+    this.dirtMat.color.setScalar(0.12 + glare * 0.3);
   }
 
   setScreens(d: CockpitData) {

@@ -55,18 +55,16 @@ function startBanner(aniso: number) {
   const g = c.getContext('2d')!;
   g.fillStyle = '#0c1118';
   g.fillRect(0, 0, 1024, 192);
-  for (let x = 0; x < 1024; x += 24)
-    for (let y = 0; y < 2; y++) {
-      g.fillStyle = (x / 24 + y) % 2 ? '#f2f5f8' : '#0c1118';
-      g.fillRect(x, y * 24, 24, 24);
-      g.fillStyle = (x / 24 + y) % 2 ? '#0c1118' : '#f2f5f8';
-      g.fillRect(x, 192 - 48 + y * 24, 24, 24);
-    }
-  g.fillStyle = '#ffe14a';
-  g.font = 'italic 900 100px "Arial Black", Impact, sans-serif';
+  g.fillStyle = '#172b3e';
+  g.fillRect(0, 0, 1024, 192);
+  g.fillStyle = '#4dc9ed';
+  g.fillRect(0, 0, 1024, 8);
+  g.fillRect(0, 184, 1024, 8);
+  g.fillStyle = '#f0f8ff';
+  g.font = 'bold 86px Arial, sans-serif';
   g.textAlign = 'center';
   g.textBaseline = 'middle';
-  g.fillText('START / FINISH', 512, 96);
+  g.fillText('START  /  FINISH', 512, 99);
   const t = new THREE.CanvasTexture(c);
   t.colorSpace = THREE.SRGBColorSpace;
   t.anisotropy = aniso;
@@ -273,8 +271,8 @@ export function buildScenery(track: Track, scene: THREE.Scene, aniso: number, se
 
   const metalLight = new THREE.MeshStandardMaterial({ color: 0xc9d1d8, metalness: 0.6, roughness: 0.35, envMapIntensity: 1.2 });
   const metalDark = new THREE.MeshStandardMaterial({ color: 0x2a3037, metalness: 0.8, roughness: 0.4, envMapIntensity: 1.2 });
-  const cyanGlow = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.3, 1.6, 3.4), toneMapped: false });
-  const amberGlow = new THREE.MeshBasicMaterial({ color: new THREE.Color(3.4, 1.4, 0.25), toneMapped: false });
+  const cyanGlow = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.2, 0.8, 1.5), toneMapped: false });
+  const amberGlow = new THREE.MeshBasicMaterial({ color: new THREE.Color(1.5, 0.7, 0.16), toneMapped: false });
 
   /** is any *other* part of the circuit (not the neighbourhood of s) closer than rad to p? */
   const nearOtherTrack = (p: THREE.Vector3, s: number, rad: number, skip = 220) => {
@@ -393,7 +391,7 @@ export function buildScenery(track: Track, scene: THREE.Scene, aniso: number, se
     return g;
   };
   const gateS: number[] = [0];
-  const gateCount = Math.round(L / 330);
+  const gateCount = Math.max(1, Math.round(L / 600));
   for (let k = 1; k < gateCount; k++) gateS.push((k / gateCount) * L);
   for (const lp of track.loops) gateS.push(lp.s0 - 85);
   gateS.forEach((s, k) => {
@@ -428,7 +426,7 @@ export function buildScenery(track: Track, scene: THREE.Scene, aniso: number, se
     ['SOLARIS', 'ENERGY · NITRO CELLS', '#e8731a', '#5a1f0a'],
     ['OMEGA CUP', 'ANTI-GRAVITY LEAGUE', '#3d2ba8', '#0f0a35'],
   ];
-  const bbCount = Math.round(L / 380);
+  const bbCount = Math.max(1, Math.round(L / 720));
   let bbPlaced = 0;
   for (let k = 0; k < bbCount * 3 && bbPlaced < bbCount; k++) {
     const s = ((k + 0.5) / (bbCount * 3)) * L + 40;
@@ -568,9 +566,7 @@ export function buildScenery(track: Track, scene: THREE.Scene, aniso: number, se
 
   // ================================================================ START COMPLEX
   // local frame: +X = left of the circuit, +Y = up, +Z = forward
-  const hazardTex = hazardTexture();
-  hazardTex.repeat.set(3, 1);
-  const hazardMat = new THREE.MeshStandardMaterial({ map: hazardTex, roughness: 0.72, metalness: 0.15, envMapIntensity: 0.55 });
+  const hazardMat = new THREE.MeshPhysicalMaterial({ color: 0x38576a, roughness: 0.45, metalness: 0.35, clearcoat: 0.35, envMapIntensity: 0.7 });
   const concrete = new THREE.MeshStandardMaterial({ color: 0x7d8792, roughness: 0.82, metalness: 0.1, envMapIntensity: 0.55 });
   const concreteDark = new THREE.MeshStandardMaterial({ color: 0x4f5964, roughness: 0.85, metalness: 0.14, envMapIntensity: 0.5 });
   const seatMat = new THREE.MeshStandardMaterial({ color: 0x25314a, roughness: 0.7, metalness: 0.18, envMapIntensity: 0.55 });
@@ -581,7 +577,7 @@ export function buildScenery(track: Track, scene: THREE.Scene, aniso: number, se
   const rockMat = new THREE.MeshStandardMaterial({ color: 0x707b87, roughness: 0.93, metalness: 0.04, flatShading: true, envMapIntensity: 0.5 });
   const cr = rng(4242);
 
-  // --- hazard panels on both walls ---
+  // --- understated protective panels on both walls ---
   {
     const n = Math.floor((250 + 190) / 18);
     const geo = new THREE.PlaneGeometry(18, 2.4);
@@ -763,33 +759,21 @@ export function buildScenery(track: Track, scene: THREE.Scene, aniso: number, se
     root.add(mound);
   }
 
-  // --- start grid pads ---
+  // Slim starting-grid brackets instead of large dark hazard plates.
   {
-    const plateMat = new THREE.MeshStandardMaterial({ color: 0x252d36, roughness: 0.7, metalness: 0.25, envMapIntensity: 0.35 });
-    const edgeMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(0.18, 0.7, 1.0), toneMapped: false });
+    const lineMat = new THREE.MeshBasicMaterial({ color: 0x97d9ed, transparent: true, opacity: 0.75, depthWrite: false });
+    const sideGeo = new THREE.BoxGeometry(0.10, 0.025, 3.0);
+    const endGeo = new THREE.BoxGeometry(4.0, 0.025, 0.1);
     for (let slot = 0; slot < 8; slot++) {
       const row = Math.floor(slot / 2);
-      const p = -(16 + row * 14);
-      const lat = slot % 2 === 0 ? -7 : 7;
-      track.frameAt(p, f);
-      const g = new THREE.Group();
-      const pad = new THREE.Mesh(new THREE.BoxGeometry(10, 0.1, 4.4), plateMat);
-      pad.receiveShadow = true;
-      g.add(pad);
-      const face = new THREE.Mesh(
-        new THREE.PlaneGeometry(9.9, 4.3),
-        new THREE.MeshBasicMaterial({ map: gridPadTexture(slot + 1), toneMapped: true, color: 0x8f9aa6, transparent: true })
-      );
-      face.rotation.x = -Math.PI / 2;
-      face.position.y = 0.06;
-      g.add(face);
-      for (const sx of [-1, 1]) {
-        const e = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.03, 4.3), edgeMat);
-        e.position.set(sx * 4.9, 0.07, 0);
-        g.add(e);
+      track.frameAt(-(16 + row * 14), f);
+      const bracket = new THREE.Group();
+      for (const x of [-2, 2]) {
+        const side = new THREE.Mesh(sideGeo, lineMat); side.position.x = x; bracket.add(side);
       }
-      orientToFrame(g, f, lat, 0.06);
-      root.add(g);
+      const end = new THREE.Mesh(endGeo, lineMat); end.position.z = 1.5; bracket.add(end);
+      orientToFrame(bracket, f, slot % 2 === 0 ? -7 : 7, 0.09);
+      root.add(bracket);
     }
   }
 

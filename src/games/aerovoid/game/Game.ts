@@ -1,3 +1,6 @@
+import { SHORTCUT_OFFSET, SHORTCUT_HALF_WIDTH, entersShortcut, mainLateral, shortcutProgress } from './shortcut';
+import { crossedRamp, jumpPose, JUMP_ASSIST_SPEED } from './jump';
+import { planRace } from './ai';
 import * as THREE from 'three';
 import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
@@ -7,13 +10,14 @@ import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
 import { HW, PAD_HALF_LEN, PAD_HALF_WID, Track, makeFrame } from './track';
 import { buildScenery } from './scenery';
 import { TRACKS } from './trackDefs';
-import { Ship, TEAMS, Team, Trail, createShip } from './ship';
+import { Ship, ShipStyle, TEAMS, Team, Trail, createShip } from './ship';
 import { GameAudio } from './audio';
 import { Cockpit, FISHEYE } from './cockpit';
 import { RainSystem } from './weather';
 import { SUN_DIR, HORIZON, createSkyEnvironment, createCaveEnvironment } from './sky';
 
 export type Phase = 'loading' | 'menu' | 'countdown' | 'racing' | 'finished';
+export const GAME_BUILD_ID = 13;
 
 export interface ResultRow {
   name: string;
@@ -42,6 +46,9 @@ export interface HudState {
   messageId: number;
   results: ResultRow[] | null;
   teamIdx: number;
+  shipStyle: ShipStyle;
+  brakeMult: number;
+  steerMult: number;
   paused: boolean;
   muted: boolean;
   music: boolean;
@@ -51,6 +58,7 @@ export interface HudState {
   boomActive: boolean;
   trackIdx: number;
   trackName: string;
+  shortcutHint: string | null;
 }
 
 const LAPS = 3;
@@ -76,6 +84,11 @@ interface Racer {
   pitch: number;
   steer: number;
   hover: number;
+  jumpTime: number;
+  jumpStart: number;
+  shortcutActive: boolean;
+  shortcutStart: number;
+  airHeight: number;
   phase: number;
   lapIdx: number;
   lapStart: number;
@@ -91,21 +104,28 @@ interface Racer {
   lane: number;
   wallCool: number;
   throttle: number;
+  abL: number;
+  abR: number;
   boostVis: number;
   aiBoostCd: number;
+  aiLane: number;
+  aiPlanTimer: number;
+  aiSafeSpeed: number;
+  aiBlockedSpeed: number;
+  aiBoostSafe: boolean;
   slot: number;
   blob: THREE.Mesh;
 }
 
 const clamp = THREE.MathUtils.clamp;
-const CLEAR_FOG = HORIZON.clone();
-const RAIN_FOG = new THREE.Color().copy(HORIZON).multiplyScalar(0.78);
 
 const fxShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     uAmount: { value: 0 },
     uDistort: { value: 0 },
+    tWater: { value: null as THREE.Texture | null },
+    uWater: { value: 0 },
   },
   vertexShader: /* glsl */ `
     varying vec2 vUv;
@@ -114,6 +134,8 @@ const fxShader = {
     uniform sampler2D tDiffuse;
     uniform float uAmount;
     uniform float uDistort;
+    uniform sampler2D tWater;
+    uniform float uWater;
     varying vec2 vUv;
     void main(){
       vec2 c = vUv - 0.5;
@@ -121,6 +143,15 @@ const fxShader = {
       vec2 ca = c * vec2(1.7778, 1.0);
       float r2 = dot(ca, ca);
       vec2 uv = clamp(0.5 + c * (1.0 + uDistort * r2) / (1.0 + uDistort * 1.0399), 0.001, 0.999);
+      float h = texture2D(tWater, vUv).a * uWater;
+      if (h > 0.015) {
+        vec2 px = vec2(1.0 / 768.0, 1.0 / 432.0);
+        vec2 slope = vec2(texture2D(tWater, vUv + vec2(px.x, 0.0)).a - texture2D(tWater, vUv - vec2(px.x, 0.0)).a,
+                          texture2D(tWater, vUv + vec2(0.0, px.y)).a - texture2D(tWater, vUv - vec2(0.0, px.y)).a);
+        vec3 normal = normalize(vec3(-slope * 2.0, 1.0));
+        vec3 ray = refract(vec3(0.0, 0.0, -1.0), normal, 1.0 / 1.333);
+        uv = clamp(uv + ray.xy * 0.035, 0.001, 0.999);
+      }
       // Keep every sample inside the render target; extreme NOS blur used to create dark edge artefacts.
       float amt = uAmount;
       vec3 col = texture2D(tDiffuse, uv).rgb;
@@ -131,6 +162,21 @@ const fxShader = {
           + texture2D(tDiffuse, clamp(uv - shift * 0.68, 0.001, 0.999)).rgb * 0.14
           + texture2D(tDiffuse, clamp(uv - shift, 0.001, 0.999)).rgb * 0.08;
       }
+      if (h > 0.015) {
+        vec2 px = vec2(1.0 / 768.0, 1.0 / 432.0);
+        vec2 slope = vec2(texture2D(tWater, vUv + vec2(px.x, 0.0)).a - texture2D(tWater, vUv - vec2(px.x, 0.0)).a,
+                          texture2D(tWater, vUv + vec2(0.0, px.y)).a - texture2D(tWater, vUv - vec2(0.0, px.y)).a);
+        float rim = smoothstep(0.05, 0.35, length(slope)) * (1.0 - smoothstep(0.3, 0.8, h));
+        float glint = pow(max(0.0, dot(normalize(vec3(-slope * 2.0, 1.0)), normalize(vec3(-0.45, 0.65, 1.0)))), 24.0) * h;
+        col = col * (1.0 - rim * 0.32) + vec3(0.65, 0.82, 1.0) * glint * 0.32;
+      }
+      // Mild linear-space vibrance restores colour without lifting already-bright whites.
+      float lum = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      float maxCh = max(col.r, max(col.g, col.b));
+      float minCh = min(col.r, min(col.g, col.b));
+      float saturation = (maxCh - minCh) / max(maxCh, 0.001);
+      float vibrance = 0.13 * (1.0 - saturation) * (1.0 - smoothstep(1.0, 3.0, lum));
+      col = max(vec3(0.0), mix(vec3(lum), col, 1.0 + vibrance));
       gl_FragColor = vec4(clamp(col, 0.0, 10.0), 1.0);
     }`,
 };
@@ -158,6 +204,9 @@ export class Game {
   racers: Racer[] = [];
   player!: Racer;
   teamIdx = 0;
+  shipStyle: ShipStyle = 'velocity';
+  brakeMult = 3;
+  steerMult = 3;
   paused = false;
   private keys = new Set<string>();
   private time = 0;
@@ -227,9 +276,9 @@ export class Game {
     this.onHud = onHud;
     this.renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: 'high-performance' });
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 1.0;
+    this.renderer.toneMappingExposure = 0.82;
     this.renderer.shadowMap.enabled = true;
-    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    this.renderer.shadowMap.type = THREE.PCFShadowMap;
     const cv = this.renderer.domElement;
     cv.style.width = '100%';
     cv.style.height = '100%';
@@ -255,7 +304,7 @@ export class Game {
     this.scene.fog = new THREE.FogExp2(HORIZON.getHex(), 0.00012);
 
     // ---- lights (from Aether Rift) ----
-    this.sun = new THREE.DirectionalLight(0xfff1dc, 3.3);
+    this.sun = new THREE.DirectionalLight(0xfff1dc, 2.6);
     this.sun.castShadow = true;
     this.sun.shadow.mapSize.set(2048, 2048);
     const R = 140;
@@ -269,18 +318,18 @@ export class Game {
     this.sun.shadow.bias = -0.0003;
     this.sun.shadow.normalBias = 0.12;
     this.sun.shadow.radius = 2;
-    this.sun.intensity = 3.3;
+    this.sun.intensity = 2.6;
     this.scene.add(this.sun, this.sun.target);
 
     this.hemi = new THREE.HemisphereLight(0x9fc4ff, 0x9a8a72, 0.55);
     this.scene.add(this.hemi);
 
-    this.rim = new THREE.DirectionalLight(0x9fc4ff, 0.6);
+    this.rim = new THREE.DirectionalLight(0x9fc4ff, 0);
     this.rim.position.set(-120, 60, -90);
     this.scene.add(this.rim, this.rim.target);
 
-    this.renderer.toneMappingExposure = 1.0;
-    this.pLight = new THREE.PointLight(0x40c0ff, 300, 45, 2);
+    this.renderer.toneMappingExposure = 0.82;
+    this.pLight = new THREE.PointLight(0x4db8ff, 0, 60, 2);
     this.scene.add(this.pLight);
 
     // ---- world ----
@@ -310,7 +359,7 @@ export class Game {
     const rt = new THREE.WebGLRenderTarget(1280, 720, { type: THREE.HalfFloatType, samples: 2 });
     this.composer = new EffectComposer(this.renderer, rt);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
-    this.bloom = new UnrealBloomPass(new THREE.Vector2(1280, 720), 0.16, 0.45, 1.55);
+    this.bloom = new UnrealBloomPass(new THREE.Vector2(1280, 720), 0.055, 0.25, 2.0);
     this.composer.addPass(this.bloom);
     this.fx = new ShaderPass(fxShader);
     this.composer.addPass(this.fx);
@@ -335,6 +384,9 @@ export class Game {
         for (const mm of Array.isArray(mat) ? mat : [mat]) {
           const t = (mm as THREE.MeshBasicMaterial).map;
           if (t) t.dispose();
+          const standard = mm as THREE.MeshStandardMaterial;
+          standard.bumpMap?.dispose();
+          if (standard.roughnessMap !== standard.bumpMap) standard.roughnessMap?.dispose();
           mm.dispose();
         }
       }
@@ -528,13 +580,13 @@ export class Game {
   }
 
   private makeRacer(name: string, team: Team, isPlayer: boolean, slot: number): Racer {
-    const ship = createShip(team);
+    const ship = createShip(team, this.shipStyle);
     this.scene.add(ship.group);
     const blob = new THREE.Mesh(new THREE.PlaneGeometry(8.5, 11), this.blobMat);
     blob.renderOrder = 1;
     this.scene.add(blob);
-    const trails = ship.nozzles.map(() => {
-      const t = new Trail(ship.glowColor);
+    const trails = ship.nozzles.map((_, idx) => {
+      const t = new Trail(ship.glowColor, ship.nozzleScales[idx] ?? 1);
       this.scene.add(t.mesh);
       return t;
     });
@@ -554,6 +606,11 @@ export class Game {
       pitch: 0,
       steer: 0,
       hover: 1.7,
+      jumpTime: -1,
+      jumpStart: 0,
+      shortcutActive: false,
+      shortcutStart: 0,
+      airHeight: 0,
       phase: Math.random() * 6,
       lapIdx: -1,
       lapStart: 0,
@@ -569,15 +626,22 @@ export class Game {
       lane: (Math.random() - 0.5) * 22,
       wallCool: 0,
       throttle: 0,
+      abL: 0,
+      abR: 0,
       boostVis: 0,
-      aiBoostCd: 6 + Math.random() * 10,
+      aiBoostCd: 0.4 + Math.random() * 1.8,
+      aiLane: 0,
+      aiPlanTimer: 0,
+      aiSafeSpeed: BASE_MAX,
+      aiBlockedSpeed: Infinity,
+      aiBoostSafe: false,
       slot,
       blob,
     };
   }
 
-  private disposeRacer(r: Racer) {
-    this.scene.remove(r.ship.group, r.blob);
+  private disposeShipAndTrails(r: Racer) {
+    this.scene.remove(r.ship.group);
     const geometries = new Set<THREE.BufferGeometry>();
     const materials = new Set<THREE.Material>();
     r.ship.group.traverse((object) => {
@@ -594,6 +658,11 @@ export class Game {
       trail.mesh.geometry.dispose();
       (trail.mesh.material as THREE.Material).dispose();
     });
+  }
+
+  private disposeRacer(r: Racer) {
+    this.disposeShipAndTrails(r);
+    this.scene.remove(r.blob);
     r.blob.geometry.dispose();
   }
 
@@ -627,6 +696,11 @@ export class Game {
       r.p = -(16 + row * 14);
       r.lat = r.slot % 2 === 0 ? -7 : 7;
       r.latVel = 0;
+      r.jumpTime = -1;
+      r.jumpStart = 0;
+      r.shortcutActive = false;
+      r.shortcutStart = 0;
+      r.airHeight = 0;
       r.speed = 0;
       r.yaw = r.roll = r.pitch = r.steer = 0;
       r.lapIdx = -1;
@@ -640,8 +714,15 @@ export class Game {
       r.padTimer = 0;
       r.padLatch = -1;
       r.auto = false;
+      r.abL = 0;
+      r.abR = 0;
       r.boostVis = 0;
-      r.aiBoostCd = 6 + Math.random() * 10;
+      r.aiBoostCd = 0.4 + Math.random() * 1.8;
+      r.aiLane = r.lat;
+      r.aiPlanTimer = 0;
+      r.aiSafeSpeed = BASE_MAX;
+      r.aiBlockedSpeed = Infinity;
+      r.aiBoostSafe = false;
       this.placeRacer(r);
       r.trails.forEach((t, i) => t.reset(this.nozzleWorld(r, i)));
     });
@@ -675,6 +756,33 @@ export class Game {
     this.buildRacers();
     this.resetRace();
     this.emitHud();
+  }
+
+  setShipStyle(style: ShipStyle) {
+    if (style === this.shipStyle) return;
+    this.shipStyle = style;
+    for (const r of this.racers) {
+      this.disposeShipAndTrails(r);
+      r.ship = createShip(r.team, this.shipStyle);
+      this.scene.add(r.ship.group);
+      this.placeRacer(r);
+      const cockpitOn = r.isPlayer && this.camMode === 'cockpit' && this.phase !== 'menu' && this.phase !== 'loading';
+      r.ship.group.visible = !cockpitOn;
+      r.trails = r.ship.nozzles.map((_, idx) => {
+        const t = new Trail(r.ship.glowColor, r.ship.nozzleScales[idx] ?? 1);
+        this.scene.add(t.mesh);
+        t.reset(this.nozzleWorld(r, idx));
+        return t;
+      });
+    }
+    this.emitHud();
+  }
+
+  setBrakeMult(value: number) { this.brakeMult = Math.max(1, Math.min(4, Math.round(value))); this.emitHud(); }
+  setSteerMult(value: number) { this.steerMult = Math.max(1, Math.min(4, Math.round(value))); this.emitHud(); }
+
+  toggleShipStyle() {
+    this.setShipStyle(this.shipStyle === 'aerovoid' ? 'velocity' : 'aerovoid');
   }
 
   togglePause() {
@@ -745,6 +853,9 @@ export class Game {
     if (e.code === 'KeyM') this.toggleMute();
     if (e.code === 'KeyN') this.toggleMusic();
     if (e.code === 'KeyH') this.toggleRain();
+    if (e.code === 'Digit1') this.setBrakeMult(this.brakeMult % 4 + 1);
+    if (e.code === 'Digit2') this.setSteerMult(this.steerMult % 4 + 1);
+    if (e.code === 'KeyB') this.toggleShipStyle();
     if (e.code === 'KeyC' || e.code === 'KeyV') this.toggleCam();
     if (this.phase === 'menu') {
       if (e.code === 'ArrowLeft') this.setTeam((this.teamIdx + TEAMS.length - 1) % TEAMS.length);
@@ -793,6 +904,8 @@ export class Game {
       this.time += dt;
       this.update(dt);
     }
+    this.fx.uniforms.tWater.value = this.cockpit.rain.texture;
+    this.fx.uniforms.uWater.value = this.camMode === 'cockpit' && this.phase !== 'menu' && this.phase !== 'loading' ? 1 : 0;
     this.composer.render();
     if (this.camMode === 'cockpit' && this.phase !== 'menu' && this.phase !== 'loading') {
       // Draw the near-field cockpit after HDR bloom/blur, so it never inherits world depth or boost artefacts.
@@ -842,7 +955,7 @@ export class Game {
     this.visuals(dt);
     this.updateCamera(dt);
     this.rain.update(dt, this.camera, this.rainLevel, this.player.speed);
-    if (this.camMode === 'cockpit' && this.phase !== 'menu') this.cockpit.updateRain(dt, this.rainLevel, this.player.speed);
+    if (this.phase !== 'menu' && this.phase !== 'loading') this.cockpit.rain.update(dt, this.rainLevel, this.player.speed, this.player.steer, this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0);
     this.updateFx(dt);
 
     // hud
@@ -863,11 +976,13 @@ export class Game {
     this.rainLevel += (target - this.rainLevel) * (1 - Math.exp(-2.2 * dt));
     this.track.setWetness(this.rainLevel);
     const fog = this.scene.fog as THREE.FogExp2;
-    fog.color.copy(CLEAR_FOG).lerp(RAIN_FOG, this.rainLevel);
-    fog.density = THREE.MathUtils.lerp(0.00011, 0.00023, this.rainLevel);
-    this.scene.backgroundIntensity = THREE.MathUtils.lerp(1, 0.83, this.rainLevel);
-    this.sun.intensity = THREE.MathUtils.lerp(3.3, 2.7, this.rainLevel);
-    this.hemi.intensity = THREE.MathUtils.lerp(0.55, 0.65, this.rainLevel);
+    // Match Aether Rift's outdoor sky, key light and ambient balance. Rain remains visual.
+    fog.color.copy(HORIZON);
+    fog.density = 0.00042;
+    this.scene.backgroundIntensity = 0.85;
+    this.scene.environmentIntensity = 0.85;
+    this.sun.intensity = 2.6;
+    this.hemi.intensity = 0.55;
   }
 
   // -------------------------------------------------------------- physics
@@ -875,8 +990,63 @@ export class Game {
     if (r.isPlayer && !r.auto) this.drivePlayer(r, dt);
     else this.driveAI(r, dt);
 
-    r.speed = Math.max(0, r.speed - this.track.frameAt(r.p, this.gf).t.y * 42 * dt);
-    r.p += r.speed * dt;
+    r.speed = Math.max(0, r.speed - this.racerFrame(r, r.p, this.gf).t.y * 42 * dt);
+    // Arcade launch assist makes the gap crossable even if a racer brakes on the lip.
+    if (r.jumpTime >= 0) r.speed = Math.max(JUMP_ASSIST_SPEED, r.speed);
+    const previousP = r.p;
+    const sc = this.track.shortcut;
+    const travel = r.speed * dt;
+    r.p += r.shortcutActive && sc ? shortcutProgress(travel, sc.span, sc.length) : travel;
+    if (sc && !r.shortcutActive && r.isPlayer && !r.auto && r.jumpTime < 0) {
+      // Both roads overlap through the mouth of the fork. Pick the blue branch
+      // by steering onto it anywhere in that overlap, not at one invisible line.
+      const distanceIntoFork = this.track.wrap(r.p) - sc.start;
+      if (distanceIntoFork >= 0 && distanceIntoFork <= 70 && entersShortcut(r.lat, sc.side)) {
+        const mainFrame = this.track.frameAt(r.p, this.gf);
+        const world = this.tV.copy(mainFrame.pos).addScaledVector(mainFrame.r, r.lat);
+        let u = distanceIntoFork / sc.span;
+        const branchFrame = this.track.shortcutFrameAt(u, this.fr);
+        const delta = this.tV2.copy(world).sub(branchFrame.pos);
+        if (Math.abs(delta.dot(branchFrame.r)) <= SHORTCUT_HALF_WIDTH && Math.abs(delta.dot(branchFrame.t)) < 8) {
+          // Project onto the branch instead of snapping to a point behind the ship.
+          for (let i = 0; i < 2; i++) {
+            this.track.shortcutFrameAt(u, branchFrame);
+            delta.copy(world).sub(branchFrame.pos);
+            u = clamp(u + delta.dot(branchFrame.t) / sc.length, 0, 1);
+          }
+          this.track.shortcutFrameAt(u, branchFrame);
+          delta.copy(world).sub(branchFrame.pos);
+          r.shortcutActive = true;
+          r.shortcutStart = r.p - distanceIntoFork;
+          r.p = r.shortcutStart + u * sc.span;
+          r.lat = clamp(delta.dot(branchFrame.r), -SHORTCUT_HALF_WIDTH, SHORTCUT_HALF_WIDTH);
+          this.chaseLat = r.lat * 0.65;
+          this.say('SHORTCUT!', 2);
+        }
+      }
+    }
+    if (r.shortcutActive && sc && r.p >= r.shortcutStart + sc.span) {
+      const exit = r.shortcutStart + sc.span;
+      r.p = exit + (r.p - exit) * sc.length / sc.span;
+      r.lat = mainLateral(r.lat, sc.side);
+      r.shortcutActive = false;
+      this.chaseLat = r.lat * 0.65;
+    }
+    const lip = r.jumpTime < 0 && !r.shortcutActive ? crossedRamp(previousP, r.p, this.track.rampS, this.track.L) : null;
+    if (lip !== null) {
+      r.jumpStart = lip;
+      r.jumpTime = 0;
+      r.speed = Math.max(JUMP_ASSIST_SPEED, r.speed);
+      if (r.isPlayer) this.say('AIR ROLL!', 1.2);
+    }
+    if (r.jumpTime >= 0) {
+      r.jumpTime = Math.max(0, (r.p - r.jumpStart) / this.track.rampGap);
+      if (r.jumpTime >= 1) {
+        r.jumpTime = -1;
+        if (r.isPlayer) this.shake = Math.max(this.shake, 0.1);
+      }
+    }
+    r.airHeight = r.jumpTime >= 0 ? jumpPose(r.jumpTime).height : 0;
 
     const idx = Math.floor(r.p / this.track.L);
     if (idx > r.lapIdx) {
@@ -924,7 +1094,7 @@ export class Game {
     const L = this.track.L;
     const sR = this.track.wrap(r.p);
     let onPad = false;
-    for (let i = 0; i < this.track.pads.length; i++) {
+    for (let i = 0; !r.shortcutActive && i < this.track.pads.length; i++) {
       const pd = this.track.pads[i];
       const d = ((sR - pd.s + L * 1.5) % L) - L / 2;
       if (Math.abs(d) < PAD_HALF_LEN + r.speed * dt * 0.25 && Math.abs(r.lat - pd.lat) < PAD_HALF_WID + 1.5) {
@@ -939,39 +1109,45 @@ export class Game {
         this.boomPulse = 1;
         this.boomUntil = this.time + 1.05;
         this.boomId++;
-        if (this.camMode === 'cockpit') this.cockpit.rain.blast();
+        this.cockpit.rain.blast();
       }
     }
     if (!onPad) r.padLatch = -1;
 
     r.throttle = throttle;
+    r.abL = k.has('KeyQ') || brake > 0 ? 1 : 0;
+    r.abR = k.has('KeyE') || brake > 0 ? 1 : 0;
     this.drive(r, dt, throttle, brake, steerIn, ab, boostActive);
   }
 
   private drive(r: Racer, dt: number, throttle: number, brake: number, steerIn: number, ab: number, boostActive: boolean) {
     // speed
+    const bm = r.isPlayer ? this.brakeMult : 1;
+    const sm = r.isPlayer ? this.steerMult : 1;
+    if (brake) { throttle = 0; boostActive = false; }
     const target = boostActive ? BASE_MAX + BOOST_ADD : throttle ? BASE_MAX : 0;
     const rate = boostActive ? 1.5 : throttle ? (r.speed > BASE_MAX ? 0.8 : 1.1) : 0.3;
     r.speed += (target - r.speed) * (1 - Math.exp(-rate * dt));
     if (throttle && r.speed < 60) r.speed += 40 * dt;
-    if (brake) r.speed = Math.max(0, r.speed - 170 * dt);
-    if (ab !== 0) r.speed = Math.max(0, r.speed - 48 * Math.abs(ab) * dt);
+    if (brake) r.speed = Math.max(0, r.speed - 170 * bm * dt);
+    if (ab !== 0) r.speed = Math.max(0, r.speed - 48 * bm * Math.abs(ab) * dt);
 
     // lateral
-    const kc = this.track.curvatureAt(r.p);
-    const response = steerIn !== 0 && steerIn * r.steer < 0 ? 27 : 15;
+    const kc = r.shortcutActive ? 0 : this.track.curvatureAt(r.p);
+    const response = (steerIn !== 0 && steerIn * r.steer < 0 ? 27 : 15) * Math.sqrt(sm);
     r.steer += (steerIn - r.steer) * (1 - Math.exp(-response * dt));
     const steerEff = clamp(r.steer + ab * 1.05, -2.05, 2.05);
     // Ease steering into a barrier, but keep full authority when turning back towards the road.
-    const edge = clamp((Math.abs(r.lat) - (WALL - 8)) / 8, 0, 1);
+    const laneWall = r.shortcutActive ? SHORTCUT_HALF_WIDTH : WALL;
+    const edge = clamp((Math.abs(r.lat) - (laneWall - 5)) / 5, 0, 1);
     const edgeGrip = r.lat * steerEff > 0 ? 1 - edge * 0.55 : 1;
     const countersteer = steerEff * r.latVel < 0 ? 1.35 : 1;
-    const latAccel = steerEff * 140 * clamp(r.speed / 100, 0.18, 1) * edgeGrip * countersteer;
+    const latAccel = steerEff * 140 * sm * clamp(r.speed / 100, 0.18, 1) * edgeGrip * countersteer;
     // A turn must be steerable at racing speed; boost still requires airbraking in tight bends.
     const cf = -kc * r.speed * r.speed * 0.17;
     r.latVel += (latAccel + cf) * dt;
-    r.latVel *= Math.exp(-(steerIn === 0 && ab === 0 ? 4.2 : 3.0) * dt);
-    const maxLatSpeed = ab !== 0 ? 78 : 52;
+    r.latVel *= Math.exp(-(steerIn === 0 && ab === 0 ? 4.2 * Math.sqrt(sm) : 3.0) * dt);
+    const maxLatSpeed = (ab !== 0 ? 78 : 52) * Math.sqrt(sm);
     r.latVel = clamp(r.latVel, -maxLatSpeed, maxLatSpeed);
     r.lat += r.latVel * dt;
     this.wallCollide(r, dt);
@@ -981,19 +1157,20 @@ export class Game {
     r.yaw += (yawT - r.yaw) * (1 - Math.exp(-11 * dt));
     const rollT = clamp(steerEff * 0.32 + r.latVel * 0.004, -0.72, 0.72);
     r.roll += (rollT - r.roll) * (1 - Math.exp(-9 * dt));
-    const pitchT = (brake ? 0.07 : 0) + (boostActive ? -0.02 : 0) + 0.012 * Math.sin(this.time * 2.1 + r.phase);
+    const pitchT = (brake ? 0.07 * Math.sqrt(bm) : 0) + (boostActive ? -0.02 : 0) + 0.012 * Math.sin(this.time * 2.1 + r.phase);
     r.pitch += (pitchT - r.pitch) * (1 - Math.exp(-5 * dt));
   }
 
   private wallCollide(r: Racer, dt: number) {
     r.wallCool -= dt;
-    if (Math.abs(r.lat) <= WALL) return;
+    const wall = r.shortcutActive ? SHORTCUT_HALF_WIDTH : WALL;
+    if (Math.abs(r.lat) <= wall) return;
     const sign = Math.sign(r.lat);
     if (r.isPlayer && r.speed > 30) this.scrapeLevel = clamp(r.speed / 220, 0, 1);
     const into = r.latVel * sign;
-    r.lat = sign * WALL;
-    const f = this.track.frameAt(r.p, this.fr);
-    const origin = this.tV.copy(f.pos).addScaledVector(f.r, sign * (WALL + 2.2)).addScaledVector(f.u, 1.2);
+    r.lat = sign * wall;
+    const f = this.racerFrame(r, r.p, this.fr);
+    const origin = this.tV.copy(f.pos).addScaledVector(f.r, sign * (wall + 2.2)).addScaledVector(f.u, 1.2);
     if (into > 0) {
       r.latVel = -into * 0.4;
       if (into > 6 && r.wallCool <= 0) {
@@ -1016,39 +1193,52 @@ export class Game {
 
   private driveAI(r: Racer, dt: number) {
     const track = this.track;
-    const kAhead = track.curvatureAt(r.p + 70);
-    let target = BASE_MAX * r.skill * (1 - Math.min(0.12, Math.abs(kAhead) * 30));
-    const diff = this.player.p - r.p;
-    target *= 1 + clamp(diff / 2500, -0.04, 0.06);
-    r.aiBoostCd -= dt;
-    if (r.aiBoostCd <= 0 && !r.finished) {
-      r.padTimer = 1.8;
-      r.aiBoostCd = 12 + Math.random() * 12;
+    // Replan several times per second, with a small preference for the last line.
+    r.aiPlanTimer -= dt;
+    if (r.aiPlanTimer <= 0) {
+      const plan = planRace(track, r, this.racers.filter(other => other.shortcutActive === r.shortcutActive), r.lane, r.aiLane);
+      r.aiLane = plan.lane;
+      r.aiSafeSpeed = plan.safeSpeed;
+      r.aiBlockedSpeed = plan.blockedSpeed;
+      r.aiBoostSafe = plan.boostSafe;
+      r.aiPlanTimer = 0.14;
     }
-    if (r.padTimer > 0) r.padTimer -= dt;
-    const boosting = r.padTimer > 0;
-    if (boosting) target += 50;
-    if (r.finished) target = BASE_MAX * 0.65;
-    r.throttle = 1;
-    r.speed += (target - r.speed) * (1 - Math.exp(-1.0 * dt));
-
-    let laneT = r.lane + clamp(kAhead * 2600, -10, 10) * 0.6 + Math.sin(this.time * 0.35 + r.phase) * 3;
-    for (const o of this.racers) {
-      if (o === r) continue;
-      const dp = o.p - r.p;
-      if (dp > 0 && dp < 28 && Math.abs(o.lat - r.lat) < 5.5) laneT = r.lat + (o.lat >= r.lat ? -9 : 9);
-    }
-    laneT = clamp(laneT, -WALL + 2, WALL - 2);
-    const dl = laneT - r.lat;
-    r.latVel += (clamp(dl * 1.4, -22, 22) - r.latVel) * (1 - Math.exp(-4 * dt));
-    r.lat += r.latVel * dt;
-    if (Math.abs(r.lat) > WALL) {
-      r.lat = Math.sign(r.lat) * WALL;
-      r.latVel = 0;
-    }
-    r.yaw += (clamp((r.latVel / Math.max(r.speed, 70)) * 1.1, -0.5, 0.5) - r.yaw) * (1 - Math.exp(-8 * dt));
-    r.roll += (clamp(r.latVel * 0.012 - kAhead * 60, -0.8, 0.8) - r.roll) * (1 - Math.exp(-5 * dt));
-    r.pitch += (0.012 * Math.sin(this.time * 2.1 + r.phase) - r.pitch) * (1 - Math.exp(-5 * dt));
+    const currentS = track.wrap(r.p);
+    const kNow = track.curvatureAt(r.p);
+    const predicted = r.lat + r.latVel * 0.34;
+    const feedForward = clamp(kNow * r.speed * r.speed * 0.17 / 140, -0.85, 0.85);
+    const steer = clamp((r.aiLane - predicted) * 0.24 + feedForward, -1, 1);
+    r.aiBoostCd = Math.max(0, r.aiBoostCd - dt);
+    const clear = r.aiBoostSafe && r.aiBlockedSpeed === Infinity && Math.abs(r.lat) < WALL - 4;
+    const wantsBoost = !r.finished && clear && r.padTimer <= 0 &&
+      (r.boosting ? r.energy > 8 : r.energy > 32 && r.aiBoostCd === 0);
+    if (r.boosting && !wantsBoost) r.aiBoostCd = 1.5 + (1 - r.skill) * 3;
+    r.boosting = wantsBoost;
+    const powerLimit = (r.boosting || r.padTimer > 0) ? BASE_MAX + BOOST_ADD : BASE_MAX;
+    const limit = Math.min(r.finished ? 150 : powerLimit, r.aiSafeSpeed, r.aiBlockedSpeed);
+    const brake = r.speed > limit + 6 ? 1 : 0;
+    // A throttle cutoff caused bots to oscillate well below their potential speed.
+    const throttle = brake ? 0 : 1;
+    if (brake) r.boosting = false;
+    r.energy = clamp(r.energy + (r.boosting ? -30 : 6) * dt, 0, 100);
+    r.padTimer = Math.max(0, r.padTimer - dt);
+    let onPad = false;
+    track.pads.forEach((pad, i) => {
+      const distance = ((currentS - pad.s + track.L * 1.5) % track.L) - track.L / 2;
+      if (Math.abs(distance) < PAD_HALF_LEN + r.speed * dt * 0.25 && Math.abs(r.lat - pad.lat) < PAD_HALF_WID + 1.5) {
+        onPad = true;
+        if (r.padLatch !== i) {
+          r.padLatch = i; r.padTimer = 2.4;
+          r.energy = Math.min(100, r.energy + 20);
+          r.speed = Math.min(r.speed + 42, BASE_MAX + BOOST_ADD + 20);
+        }
+      }
+    });
+    if (!onPad) r.padLatch = -1;
+    r.throttle = throttle;
+    r.abL = brake ? 0.7 : 0;
+    r.abR = brake ? 0.7 : 0;
+    this.drive(r, dt, throttle, brake, steer, 0, r.boosting || r.padTimer > 0);
   }
 
   private collide(dt: number) {
@@ -1058,7 +1248,7 @@ export class Game {
         const a = rs[i],
           b = rs[j];
         const dp = a.p - b.p;
-        if (Math.abs(dp) > 6) continue;
+        if (a.shortcutActive !== b.shortcutActive || Math.abs(dp) > 6 || Math.abs(a.airHeight - b.airHeight) > 3) continue;
         const dl = a.lat - b.lat;
         if (Math.abs(dl) > 3.8) continue;
         const sgn = dl === 0 ? (i % 2 ? 1 : -1) : Math.sign(dl);
@@ -1082,14 +1272,33 @@ export class Game {
     return this.tV3.copy(r.ship.nozzles[i]).applyQuaternion(g.quaternion).add(g.position).clone();
   }
 
+  private racerFrame(r: Racer, progress: number, out: ReturnType<typeof makeFrame>) {
+    const shortcut = this.track.shortcut;
+    if (r.shortcutActive && shortcut) {
+      const relative = progress - r.shortcutStart;
+      if (relative < 0 || relative > shortcut.span) {
+        // Continue the camera's line onto the shared road, rather than clamping
+        // it to the fork and placing the camera in front of the vehicle.
+        this.track.frameAt(progress, out);
+        out.pos.addScaledVector(out.r, shortcut.side * SHORTCUT_OFFSET);
+        return out;
+      }
+      return this.track.shortcutFrameAt(relative / shortcut.span, out);
+    }
+    return this.track.frameAt(progress, out);
+  }
+
   private placeRacer(r: Racer) {
-    const f = this.track.frameAt(r.p, this.fr);
+    const f = this.racerFrame(r, r.p, this.fr);
+    const jump = r.jumpTime >= 0 ? jumpPose(r.jumpTime) : null;
+    const pitch = r.pitch + (jump?.pitch ?? 0);
     const fwd = this.tV.copy(f.t).multiplyScalar(Math.cos(r.yaw)).addScaledVector(f.r, Math.sin(r.yaw));
-    fwd.multiplyScalar(Math.cos(r.pitch)).addScaledVector(f.u, Math.sin(r.pitch)).normalize();
+    fwd.multiplyScalar(Math.cos(pitch)).addScaledVector(f.u, Math.sin(pitch)).normalize();
     const right = this.tV2.crossVectors(fwd, f.u).normalize();
     const up = this.tV3.crossVectors(right, fwd).normalize();
-    const cr = Math.cos(r.roll),
-      sr = Math.sin(r.roll);
+    const roll = r.roll + (jump?.roll ?? 0);
+    const cr = Math.cos(roll),
+      sr = Math.sin(roll);
     const up2 = this.tV4.copy(up).multiplyScalar(cr).addScaledVector(right, sr);
     right.crossVectors(fwd, up2).normalize();
     right.negate(); // left
@@ -1097,14 +1306,16 @@ export class Game {
     const g = r.ship.group;
     g.quaternion.setFromRotationMatrix(this.tM);
     const hover = 1.7 + 0.14 * Math.sin(this.time * 3 + r.phase) + r.speed * 0.0012;
-    r.hover = hover;
-    g.position.copy(f.pos).addScaledVector(f.r, r.lat).addScaledVector(f.u, hover);
+    r.hover = hover + r.airHeight;
+    g.position.copy(f.pos).addScaledVector(f.r, r.lat).addScaledVector(f.u, r.hover);
     r.blob.position.copy(f.pos).addScaledVector(f.r, r.lat).addScaledVector(f.u, 0.06);
+    // The ground shadow stays aligned to the track, not to the spinning hull.
+    this.tM.makeBasis(this.tV2.copy(f.r).negate(), f.u, f.t);
     r.blob.quaternion.setFromRotationMatrix(this.tM);
     r.blob.rotateX(-Math.PI / 2);
-    const bs = 1 + r.speed * 0.0006;
+    const bs = Math.max(0.45, (1 + r.speed * 0.0006) / (1 + r.airHeight * 0.08));
     r.blob.scale.set(bs, bs, 1);
-    r.blob.visible = !(r.isPlayer && this.camMode === 'cockpit');
+    r.blob.visible = r.jumpTime < 0 && !(r.isPlayer && this.camMode === 'cockpit');
     if (r.isPlayer) {
       this.pf.pos.copy(f.pos);
       this.pf.t.copy(f.t);
@@ -1117,11 +1328,12 @@ export class Game {
   private visuals(dt: number) {
     const time = this.time;
     for (const r of this.racers) {
-      const boostOn = r.isPlayer && !r.auto ? r.boosting || r.padTimer > 0 : r.padTimer > 0;
+      const boostOn = r.boosting || r.padTimer > 0;
       r.boostVis += ((boostOn ? 1 : 0) - r.boostVis) * (1 - Math.exp(-7 * dt));
       const speedN = clamp(r.speed / BASE_MAX, 0, 1.6);
       const power = clamp(r.throttle * 0.6 + speedN * 0.4, 0, 1);
       r.ship.setFlame(this.phase === 'menu' ? 0.15 : power, r.boostVis, time);
+      r.ship.setAirbrake?.(this.phase === 'menu' ? 0 : r.abL, this.phase === 'menu' ? 0 : r.abR, dt);
       // trails
       const g = r.ship.group;
       const rightW = this.tV2.set(1, 0, 0).applyQuaternion(g.quaternion);
@@ -1134,11 +1346,12 @@ export class Game {
     // player lights
     const p = this.player;
     const pg = p.ship.group;
-    this.pLight.position.copy(pg.position).addScaledVector(this.pf.u, -0.5);
+    this.pLight.position.copy(pg.position).addScaledVector(this.pf.t, -3.5).addScaledVector(this.pf.u, 0.8);
     this.pLight.color.copy(p.ship.glowColor).lerp(this.tC.setRGB(1, 0.45, 0.15), p.boostVis);
-    this.pLight.intensity = 260 + p.boostVis * 280 + this.boomPulse * 160;
-    this.sun.target.position.copy(pg.position);
-    this.sun.position.copy(pg.position).addScaledVector(this.sunDir, 200);
+    this.pLight.intensity = p.boostVis * 70 + p.throttle * 6;
+    this.sun.target.position.copy(pg.position).addScaledVector(this.pf.t, 40);
+    this.sun.position.copy(this.sun.target.position).addScaledVector(this.sunDir, 320);
+    this.sun.target.updateMatrixWorld();
     this.rim.position.copy(pg.position).addScaledVector(this.sunDir, -140).add(new THREE.Vector3(0, 80, 0));
     this.rim.target.position.copy(pg.position);
     this.rim.target.updateMatrixWorld();
@@ -1194,19 +1407,21 @@ export class Game {
     if (this.phase !== 'menu' && this.phase !== 'loading') {
       // Riding the track behind the craft keeps the camera above the road through tight vertical loops.
       const dist = 12 + speedN * 1.8 + p.boostVis * 1.4;
-      const back = this.track.frameAt(p.p - dist, this.chaseFrame);
-      const ahead = this.track.frameAt(p.p + 15, this.lookFrame);
+      const sc = p.shortcutActive ? this.track.shortcut : null;
+      const cameraScale = sc ? sc.span / sc.length : 1;
+      const back = this.racerFrame(p, p.p - dist * cameraScale, this.chaseFrame);
+      const ahead = this.racerFrame(p, p.p + 15 * cameraScale, this.lookFrame);
       // Let the craft move across the screen; a camera locked to its lane hides steering feedback.
       this.chaseLat += (p.lat * 0.65 - this.chaseLat) * (1 - Math.exp(-5 * dt));
       const cameraLat = clamp(this.chaseLat - p.latVel * 0.02, -WALL + 3, WALL - 3);
-      const chasePos = this.tV.copy(back.pos).addScaledVector(back.r, cameraLat).addScaledVector(back.u, 4.9);
+      const chasePos = this.tV.copy(back.pos).addScaledVector(back.r, cameraLat).addScaledVector(back.u, 4.9 + p.airHeight * 0.75);
       if (this.phase === 'countdown') cam.position.lerp(chasePos, 1 - Math.exp(-6 * dt));
       else cam.position.copy(chasePos);
       this.shake = Math.max(0, this.shake - dt * 2.2);
       const sh = this.shake * 0.22 + p.boostVis * 0.012;
       cam.position.add(this.tV2.set((Math.random() - 0.5) * sh, (Math.random() - 0.5) * sh, (Math.random() - 0.5) * sh));
       cam.up.copy(back.u).addScaledVector(back.r, -p.steer * 0.045).normalize();
-      cam.lookAt(this.tV3.copy(ahead.pos).addScaledVector(ahead.r, p.lat * 0.25).addScaledVector(ahead.u, 2.3));
+      cam.lookAt(this.tV3.copy(ahead.pos).addScaledVector(ahead.r, p.lat * 0.25).addScaledVector(ahead.u, 2.3 + p.airHeight * 0.8));
       if (cam.view && cam.view.enabled) cam.clearViewOffset();
       cam.near = 0.4;
       const fovT = 66 + speedN * 9 + p.boostVis * 8 + this.boomPulse * 3.5;
@@ -1310,7 +1525,7 @@ export class Game {
       : 0;
     const cockActive = cockpitOn && this.phase !== 'menu' && this.phase !== 'loading';
     this.fx.uniforms.uDistort.value = cockActive ? FISHEYE : 0;
-    this.bloom.strength = 0.16 + p.boostVis * (cockpitOn ? 0.015 : 0.035);
+    this.bloom.strength = 0.055 + p.boostVis * (cockpitOn ? 0.008 : 0.018);
     this.audio.update(
       clamp(p.speed / (BASE_MAX + BOOST_ADD), 0, 1),
       p.throttle,
@@ -1388,6 +1603,9 @@ export class Game {
       messageId: this.message ? this.message.id : 0,
       results,
       teamIdx: this.teamIdx,
+      shipStyle: this.shipStyle,
+      brakeMult: this.brakeMult,
+      steerMult: this.steerMult,
       paused: this.paused,
       muted: this.audio.muted,
       music: this.audio.musicOn,
@@ -1397,6 +1615,15 @@ export class Game {
       boomActive: this.time < this.boomUntil,
       trackIdx: this.trackIdx,
       trackName: TRACKS[this.trackIdx].name,
+      shortcutHint: (() => {
+        const sc = this.track.shortcut;
+        if (!sc || this.phase !== 'racing') return null;
+        if (p.shortcutActive) return 'JALUR SHORTCUT';
+        const d = (sc.start - this.track.wrap(p.p) + this.track.L) % this.track.L;
+        if (d > 650) return null;
+        const direction = sc.side > 0 ? 'KANAN →' : '← KIRI';
+        return `SHORTCUT ${direction} · BIASA: TETAP DI TENGAH`;
+      })(),
     });
     if (this.camMode === 'cockpit' && this.cockpit && this.time - this.lastCockpitHud >= 0.09) {
       this.lastCockpitHud = this.time;

@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 
-const COUNT = 620;
+const COUNT = 1800;
 const RADIUS = 56;
 
 const rainVertex = /* glsl */ `
@@ -20,7 +20,7 @@ varying float vFade;
 void main() {
   float side = smoothstep(0.0, 0.3, vUv.x) * (1.0 - smoothstep(0.7, 1.0, vUv.x));
   float tip = smoothstep(0.0, 0.28, vUv.y) * (1.0 - smoothstep(0.72, 1.0, vUv.y));
-  float alpha = side * tip * vFade * uRain * 0.7;
+  float alpha = side * tip * vFade * uRain * 0.75;
   gl_FragColor = vec4(0.78, 0.9, 1.0, alpha);
 }`;
 

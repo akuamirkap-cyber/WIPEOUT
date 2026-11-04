@@ -1,7 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Game, HudState } from './game/Game';
+import { Game, GAME_BUILD_ID, HudState } from './game/Game';
 import { TEAMS } from './game/ship';
 import { TRACKS, trackPreview } from './game/trackDefs';
+
+// Engine instances cannot be patched in place; reload rather than leave stale 3D assets.
+if (import.meta.hot) import.meta.hot.accept('./game/Game', () => window.location.reload());
 
 const hex = (n: number) => '#' + n.toString(16).padStart(6, '0');
 
@@ -10,6 +13,15 @@ function fmt(t: number | null) {
   const m = Math.floor(t / 60);
   const s = t - m * 60;
   return `${m}:${s.toFixed(2).padStart(5, '0')}`;
+}
+
+function IntensityPicker({ hud, game }: { hud: HudState; game: Game | null }) {
+  return <div className="intensity-picker interactive" aria-label="Pengaturan intensitas kontrol">
+    {([['REM', hud.brakeMult, (n: number) => game?.setBrakeMult(n)], ['PINDAH JALUR', hud.steerMult, (n: number) => game?.setSteerMult(n)]] as const).map(([label, value, set]) =>
+      <div className="intensity-row" key={label} role="group" aria-label={label}>
+        <span>{label}</span>{[1, 2, 3, 4].map(n => <button key={n} className={value === n ? 'sel' : ''} aria-pressed={value === n} onClick={() => set(n)}>{n}X</button>)}
+      </div>)}
+  </div>;
 }
 
 const HEX_PTS = '50,3 91,26.5 91,73.5 50,97 9,73.5 9,26.5';
@@ -158,7 +170,7 @@ export default function App() {
       game.dispose();
       gameRef.current = null;
     };
-  }, []);
+  }, [GAME_BUILD_ID]);
 
   const g = () => gameRef.current;
   const phase = hud?.phase ?? 'loading';
@@ -208,13 +220,18 @@ export default function App() {
                   <span>{fmt(hud.last)}</span>
                 </div>
                 <div className="row" style={{ fontSize: '1.05cqw', color: '#7fa3cc' }}>
-                  <span>{TEAMS[hud.teamIdx].name} · AG-CLASS</span>
+                  <span>
+                    {TEAMS[hud.teamIdx].name} · {hud.shipStyle === 'velocity' ? 'VELOCITY HULL' : 'AG-CLASS'}
+                  </span>
                 </div>
               </div>
               )}
 
               {hud.camMode === 'chase' && <Speedo speed={hud.speed} energy={hud.energy} boosting={hud.boosting} />}
 
+              {hud.shortcutHint && (
+                <div className="shortcut-hint">{hud.shortcutHint}</div>
+              )}
               {hud.phase === 'countdown' && (
                 <div style={{ position: 'absolute', top: '10cqw', left: 0, right: 0, textAlign: 'center', fontSize: '1.5cqw', letterSpacing: '0.5cqw', color: '#8fb4dd' }}>
                   {hud.trackName}
@@ -280,6 +297,11 @@ export default function App() {
             <button className="tb interactive" onClick={() => g()?.toggleRain()}>
               HUJAN {hud?.raining ? 'DERAS' : 'REDA'} <kbd>H</kbd>
             </button>
+            <button className="tb interactive" onClick={() => g()?.toggleShipStyle()}>
+              BODI {hud?.shipStyle === 'velocity' ? 'VELOCITY' : 'AEROVOID'} <kbd>B</kbd>
+            </button>
+            <button className="tb interactive" onClick={() => g()?.setBrakeMult((hud?.brakeMult ?? 1) % 4 + 1)}>REM {hud?.brakeMult}X <kbd>1</kbd></button>
+            <button className="tb interactive" onClick={() => g()?.setSteerMult((hud?.steerMult ?? 1) % 4 + 1)}>JALUR {hud?.steerMult}X <kbd>2</kbd></button>
             <button className="tb interactive" onClick={() => g()?.toggleCam()}>
               CAM {hud?.camMode === 'cockpit' ? 'COCKPIT' : 'CHASE'} <kbd>C</kbd>
             </button>
@@ -295,6 +317,7 @@ export default function App() {
             <div className="bigmsg" style={{ position: 'static', fontSize: '6cqw' }}>
               PAUSED
             </div>
+            <IntensityPicker hud={hud} game={g()} />
             <button className="btn" onClick={() => g()?.togglePause()}>
               RESUME
             </button>
@@ -326,7 +349,37 @@ export default function App() {
             <div className="trk-desc">{TRACKS[hud.trackIdx].desc}</div>
 
             <div className="lbl">
-              KENDARAAN — <span style={{ color: '#fff' }}>{TEAMS[hud.teamIdx].name}</span>
+              BENTUK KENDARAAN —{' '}
+              <span style={{ color: '#e8ff3a' }}>
+                {hud.shipStyle === 'velocity' ? 'VELOCITY (TWIN-PRONG)' : 'AEROVOID (AG-STD)'}
+              </span>
+            </div>
+            <div className="hullgrid interactive">
+              <button
+                className={'hull' + (hud.shipStyle === 'aerovoid' ? ' sel' : '')}
+                onClick={() => g()?.setShipStyle('aerovoid')}
+              >
+                <span className="hull-badge">AG</span>
+                <div>
+                  <b>AEROVOID</b>
+                  <small>Bodi Asli · 2 Nacelle + Center NOS</small>
+                </div>
+              </button>
+              <button
+                className={'hull' + (hud.shipStyle === 'velocity' ? ' sel' : '')}
+                onClick={() => g()?.setShipStyle('velocity')}
+              >
+                <span className="hull-badge">VL</span>
+                <div>
+                  <b>VELOCITY</b>
+                  <small>Bodi Velocity · Central + Twin Prong NOS</small>
+                </div>
+              </button>
+            </div>
+
+            <IntensityPicker hud={hud} game={g()} />
+            <div className="lbl">
+              WARNA TIM — <span style={{ color: '#fff' }}>{TEAMS[hud.teamIdx].name}</span>
             </div>
             <div className="teamgrid interactive">
               {TEAMS.map((t, i) => (
@@ -340,7 +393,9 @@ export default function App() {
               <button className="btn" onClick={() => g()?.startRace()}>
                 START RACE
               </button>
-              <span style={{ marginLeft: '1.4cqw', fontSize: '1.05cqw', color: '#8fb4dd' }}>ENTER · ↑↓ lintasan · ←→ kendaraan</span>
+              <span style={{ marginLeft: '1.4cqw', fontSize: '1.05cqw', color: '#8fb4dd' }}>
+                ENTER · ↑↓ lintasan · ←→ tim · B bodi
+              </span>
             </div>
             <div className="keys">
               <span>
@@ -359,6 +414,9 @@ export default function App() {
               </span>
               <span>
                 <kbd>SHIFT</kbd> Nitro
+              </span>
+              <span>
+                <kbd>B</kbd> Bodi (Aerovoid/Velocity)
               </span>
               <span>
                 <kbd>C</kbd> Cockpit
