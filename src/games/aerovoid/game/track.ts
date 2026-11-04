@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { TrackDef, loopList, makeCurve } from './trackDefs';
+import { RAMP_APPROACH, LANDING_RETURN, JUMP_GAP_LENGTH, jumpTrackHeight } from './jump';
+import { SHORTCUT_OFFSET, SHORTCUT_HALF_WIDTH, followsForward } from './shortcut';
 
 export const TRACK_WIDTH = 46;
 export const HW = TRACK_WIDTH / 2;
@@ -82,6 +84,12 @@ function roadTexture(maxAniso: number) {
     g.fillStyle = `rgba(${v},${v},${v},0.06)`;
     g.fillRect(rand() * 512, rand() * 1024, 1 + rand() * 3, 1 + rand() * 3);
   }
+  // Brushed alloy wear and fine directional scratches, kept subtle at racing speed.
+  for (let i = 0; i < 1700; i++) {
+    const x = 60 + rand() * 392, y = rand() * 1024;
+    g.fillStyle = rand() > 0.5 ? 'rgba(193,215,225,0.07)' : 'rgba(4,10,18,0.12)';
+    g.fillRect(x, y, 0.6 + rand() * 1.5, 4 + rand() * 35);
+  }
   // hazard bands on the edges
   for (const [x0, x1] of [
     [0, 44],
@@ -93,13 +101,13 @@ function roadTexture(maxAniso: number) {
     g.clip();
     g.fillStyle = '#1b1e23';
     g.fillRect(x0, 0, x1 - x0, 1024);
-    g.fillStyle = '#d9821c';
-    for (let y = -100; y < 1124; y += 64) {
+    g.fillStyle = '#526e7a';
+    for (let y = -128; y < 1152; y += 128) {
       g.beginPath();
       g.moveTo(x0, y);
       g.lineTo(x1, y - 44);
-      g.lineTo(x1, y - 44 + 32);
-      g.lineTo(x0, y + 32);
+      g.lineTo(x1, y - 44 + 22);
+      g.lineTo(x0, y + 22);
       g.closePath();
       g.fill();
     }
@@ -111,6 +119,13 @@ function roadTexture(maxAniso: number) {
   for (const x of [44, 254, 466]) g.fillRect(x - 2, 0, 4, 1024);
   g.fillStyle = 'rgba(180,200,220,0.18)';
   for (let y = 0; y < 1024; y += 256) g.fillRect(44, y + 2, 424, 1);
+  // Recessed fasteners and bevels make the modular track read as engineered metal.
+  for (let y = 0; y < 1024; y += 256) for (const x of [65, 245, 267, 447]) {
+    for (const dy of [12, 244]) {
+      g.fillStyle = 'rgba(0,0,0,.55)'; g.beginPath(); g.arc(x, y + dy, 3, 0, Math.PI * 2); g.fill();
+      g.fillStyle = 'rgba(205,225,235,.35)'; g.fillRect(x - 1, y + dy - 1, 2, 1);
+    }
+  }
   // edge lines
   g.fillStyle = 'rgba(225,235,245,0.95)';
   g.fillRect(52, 0, 7, 1024);
@@ -118,8 +133,8 @@ function roadTexture(maxAniso: number) {
   // dashed center
   g.fillStyle = 'rgba(150,175,195,0.9)';
   for (let y = 0; y < 1024; y += 256) g.fillRect(252, y + 30, 8, 150);
-  // faint arrows
-  g.fillStyle = 'rgba(150,185,210,0.20)';
+  // Minimal directional arrows, kept quiet so lane markings remain readable.
+  g.fillStyle = 'rgba(150,185,210,0.09)';
   for (const x of [156, 356]) {
     for (let y = 0; y < 1024; y += 512) {
       g.beginPath();
@@ -141,13 +156,43 @@ function roadTexture(maxAniso: number) {
   return t;
 }
 
+// Linear data map shared by bump and roughness: fine grain, shallow panel seams
+// and directional wear give wet reflections a broken, believable surface.
+function roadSurfaceTexture(maxAniso: number) {
+  const c = document.createElement('canvas'); c.width = 512; c.height = 1024;
+  const g = c.getContext('2d')!; const rand = rng(784);
+  g.fillStyle = '#a8a8a8'; g.fillRect(0, 0, c.width, c.height);
+  for (let i = 0; i < 24000; i++) {
+    const v = Math.floor(110 + rand() * 90);
+    g.fillStyle = `rgba(${v},${v},${v},0.3)`;
+    g.fillRect(rand() * 512, rand() * 1024, 1 + rand() * 2, 1 + rand() * 4);
+  }
+  g.fillStyle = '#555';
+  for (let y = 0; y < 1024; y += 256) g.fillRect(0, y, 512, 2);
+  for (const x of [44, 254, 466]) g.fillRect(x, 0, 2, 1024);
+  for (let i = 0; i < 600; i++) {
+    g.fillStyle = 'rgba(65,65,65,.18)';
+    g.fillRect(rand() * 512, rand() * 1024, 1, 5 + rand() * 25);
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping; t.anisotropy = maxAniso;
+  return t;
+}
+
 function wallTexture(maxAniso: number) {
   const c = document.createElement('canvas');
   c.width = 128;
   c.height = 256;
   const g = c.getContext('2d')!;
-  g.fillStyle = '#dfe5ea';
+  g.fillStyle = '#c2cdd5';
   g.fillRect(0, 0, 128, 256);
+  const rand = rng(98);
+  for (let i = 0; i < 2500; i++) {
+    g.fillStyle = rand() > .5 ? 'rgba(255,255,255,.09)' : 'rgba(10,20,30,.08)';
+    g.fillRect(rand() * 128, rand() * 200, 1, 1 + rand() * 7);
+  }
+  g.fillStyle = 'rgba(255,255,255,.2)';
+  for (let x = 0; x < 128; x += 32) g.fillRect(x + 3, 5, 1, 188);
   g.fillStyle = '#20252b';
   g.fillRect(0, 200, 128, 56);
   g.fillStyle = 'rgba(0,0,0,0.35)';
@@ -221,8 +266,12 @@ export class Track {
   loops: { s0: number; s1: number }[] = [];
   group = new THREE.Group();
   pads: { s: number; lat: number }[] = [];
+  rampS = 0;
+  rampGap = 0;
+  private rampReady = false;
+  shortcut: { start: number; span: number; side: number; curve: THREE.CubicBezierCurve3; length: number; up0: THREE.Vector3; up1: THREE.Vector3 } | null = null;
   padTex: THREE.Texture;
-  roadMaterial!: THREE.MeshStandardMaterial;
+  roadMaterial!: THREE.MeshPhysicalMaterial;
   minimap: { x: number; y: number }[] = [];
   minY = 0;
   maxY = 0;
@@ -235,14 +284,26 @@ export class Track {
   constructor(maxAniso: number, def: TrackDef) {
     this.def = def;
     this.buildCurve();
+    this.chooseRamp();
+    this.buildJumpProfile();
+    // Never leave a boost pad floating in the gap or under the ramp.
+    for (const pad of this.pads) {
+      const d = this.rampOffset(pad.s);
+      if (d > -RAMP_APPROACH - 15 && d < this.rampGap + 30) {
+        pad.s = this.wrap(this.rampS - RAMP_APPROACH - 40);
+      }
+    }
+    this.chooseShortcut();
     this.padTex = padTexture();
     this.buildMesh(maxAniso);
   }
 
   setWetness(level: number) {
-    this.roadMaterial.roughness = THREE.MathUtils.lerp(0.62, 0.34, level);
+    this.roadMaterial.roughness = THREE.MathUtils.lerp(0.82, 0.52, level);
     this.roadMaterial.metalness = THREE.MathUtils.lerp(0.3, 0.42, level);
-    this.roadMaterial.envMapIntensity = THREE.MathUtils.lerp(0.8, 1.3, level);
+    this.roadMaterial.envMapIntensity = THREE.MathUtils.lerp(0.8, 1.0, level);
+    this.roadMaterial.clearcoat = THREE.MathUtils.lerp(0.12, 0.45, level);
+    this.roadMaterial.clearcoatRoughness = THREE.MathUtils.lerp(0.45, 0.26, level);
   }
 
   private buildCurve() {
@@ -385,11 +446,202 @@ export class Track {
     }
   }
 
+  /** Choose a clear, gently curved section with enough space to land before a loop. */
+  private chooseRamp() {
+    let best = Infinity;
+    for (let i = 0; i < 160; i++) {
+      const s = this.L * (0.12 + 0.76 * i / 159);
+      if (!this.flat(s + JUMP_GAP_LENGTH * 0.5, JUMP_GAP_LENGTH * 0.5 + RAMP_APPROACH + 30)) continue;
+      let bend = 0, grade = 0;
+      for (let d = -RAMP_APPROACH; d <= JUMP_GAP_LENGTH + LANDING_RETURN; d += 30) {
+        bend = Math.max(bend, Math.abs(this.curvatureAt(s + d)));
+        grade = Math.max(grade, Math.abs(this.slopeAt(s + d)));
+      }
+      let padPenalty = 0;
+      for (const pad of this.pads) {
+        const distance = Math.abs(((pad.s - s + this.L * 1.5) % this.L) - this.L / 2);
+        if (distance < JUMP_GAP_LENGTH + 50) padPenalty += (JUMP_GAP_LENGTH + 50 - distance) * 0.001;
+      }
+      const score = bend * 20 + grade * 0.1 + padPenalty + Math.abs(s / this.L - 0.3) * 0.025;
+      if (score < best) { best = score; this.rampS = s; }
+    }
+    // A non-zero fallback is retained even on unusually constrained layouts.
+    if (!Number.isFinite(best)) this.rampS = this.L * 0.3;
+    // Align both ends with mesh stations, avoiding half-polygons across the gap.
+    this.rampS = Math.round(this.rampS / this.ds) * this.ds;
+    this.rampGap = Math.round(JUMP_GAP_LENGTH / this.ds) * this.ds;
+  }
+
+  private buildJumpProfile() {
+    const affected: number[] = [];
+    for (let i = 0; i < this.N; i++) {
+      const d = this.rampOffset(i * this.ds);
+      const h = jumpTrackHeight(d, this.rampGap);
+      if (h !== 0) this.P[i].addScaledVector(this.U[i], h);
+      if (d >= -RAMP_APPROACH - this.ds * 2 && d <= this.rampGap + LANDING_RETURN + this.ds * 2) affected.push(i);
+    }
+    for (const i of affected) {
+      const tangent = this.P[(i + 1) % this.N].clone().sub(this.P[(i - 1 + this.N) % this.N]).normalize();
+      const up = this.U[i].clone().addScaledVector(tangent, -this.U[i].dot(tangent)).normalize();
+      this.T[i].copy(tangent); this.U[i].copy(up);
+      this.R[i].crossVectors(tangent, up).normalize();
+    }
+    this.rampReady = true;
+  }
+
+  /** A physically shorter inner line that rejoins the normal circuit. */
+  private chooseShortcut() {
+    const span = Math.min(520, this.L * 0.13);
+    let bestSaving = 0;
+    const f0 = makeFrame(), f1 = makeFrame();
+    for (let i = 0; i < 100; i++) {
+      const start = this.L * (0.07 + i * 0.008);
+      if (start + span > this.L - 60 || !this.flat(start + span / 2, span / 2 + 35)) continue;
+      this.frameAt(start, f0); this.frameAt(start + span, f1);
+      for (const side of [-1, 1]) {
+        const a = f0.pos.clone().addScaledVector(f0.r, side * SHORTCUT_OFFSET);
+        const b = f1.pos.clone().addScaledVector(f1.r, side * SHORTCUT_OFFSET);
+        const curve = new THREE.CubicBezierCurve3(a, a.clone().addScaledVector(f0.t, span * 0.25), b.clone().addScaledVector(f1.t, -span * 0.25), b);
+        // Reject cuts that turn against the racing direction at any point.
+        let forward = true;
+        const check = makeFrame();
+        for (let sample = 0; sample <= 20; sample++) {
+          const u = sample / 20;
+          this.frameAt(start + span * u, check);
+          if (!followsForward(curve.getTangentAt(u), check.t)) { forward = false; break; }
+        }
+        if (!forward) continue;
+        const len = curve.getLength();
+        const saving = span - len;
+        if (saving > bestSaving && len > span * 0.4) {
+          bestSaving = saving;
+          this.shortcut = { start, span, side, curve, length: len, up0: f0.u.clone(), up1: f1.u.clone() };
+        }
+      }
+      // Prefer the first substantial shortcut, so the fork is encountered early in the lap.
+      if (bestSaving >= 20) break;
+    }
+    // Do not grant artificial progress on a shortcut that isn't actually shorter.
+    if (bestSaving < 8) this.shortcut = null;
+  }
+
+  shortcutFrameAt(progress: number, out: Frame) {
+    const shortcut = this.shortcut!;
+    const t = THREE.MathUtils.clamp(progress, 0, 1);
+    shortcut.curve.getPointAt(t, out.pos);
+    shortcut.curve.getTangentAt(t, out.t).normalize();
+    out.u.lerpVectors(shortcut.up0, shortcut.up1, t).normalize();
+    out.r.crossVectors(out.t, out.u).normalize();
+    out.u.crossVectors(out.r, out.t).normalize();
+    return out;
+  }
+
+  private buildShortcut() {
+    const sc = this.shortcut;
+    if (!sc) return;
+    const n = 100, pos: number[] = [], uv: number[] = [], indices: number[] = [];
+    const frame = makeFrame();
+    for (let i = 0; i <= n; i++) {
+      this.shortcutFrameAt(i / n, frame);
+      for (const side of [-1, 1]) {
+        const p = frame.pos.clone().addScaledVector(frame.r, side * SHORTCUT_HALF_WIDTH).addScaledVector(frame.u, 0.12);
+        pos.push(p.x, p.y, p.z); uv.push(side < 0 ? 0 : 1, i / n * 5);
+      }
+      if (i < n) { const j = i * 2; indices.push(j, j + 1, j + 2, j + 1, j + 3, j + 2); }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geometry.setIndex(indices); geometry.computeVertexNormals();
+    const road = new THREE.Mesh(geometry, new THREE.MeshPhysicalMaterial({ color: 0x23556a, metalness: 0.32, roughness: 0.48, clearcoat: 0.35, side: THREE.DoubleSide }));
+    road.receiveShadow = true; this.group.add(road);
+    // Thin luminous edge strips keep the risky alternate route readable from a distance.
+    for (const side of [-1, 1]) {
+      const points: THREE.Vector3[] = [];
+      for (let i = 0; i <= n; i++) {
+        this.shortcutFrameAt(i / n, frame);
+        points.push(frame.pos.clone().addScaledVector(frame.r, side * (SHORTCUT_HALF_WIDTH - 0.3)).addScaledVector(frame.u, 0.2));
+      }
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints(points), new THREE.LineBasicMaterial({ color: 0x58e2ff }));
+      this.group.add(line);
+    }
+    const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 256;
+    const g = canvas.getContext('2d')!;
+    g.fillStyle = '#102d42'; g.fillRect(0, 0, 512, 256);
+    g.strokeStyle = '#7af3ff'; g.lineWidth = 8; g.strokeRect(5, 5, 502, 246);
+    g.textAlign = 'center'; g.fillStyle = '#ffffff'; g.font = 'bold 66px Arial'; g.fillText('SHORTCUT', 256, 105);
+    g.fillStyle = '#69e9ff'; g.font = 'bold 84px Arial'; g.fillText(sc.side > 0 ? '>>>' : '<<<', 256, 205);
+    const tex = new THREE.CanvasTexture(canvas); tex.colorSpace = THREE.SRGBColorSpace;
+    const markerMaterial = new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide });
+    // Road markings precede the actual split, rather than flashing past at the lip.
+    for (const distance of [120, 45]) {
+      const marker = new THREE.Mesh(this.patch(sc.start - distance, 20, sc.side * SHORTCUT_OFFSET, 7, 0.11), markerMaterial);
+      this.group.add(marker);
+    }
+    // A readable overhead fork sign makes both choices visible before committing.
+    const signCanvas = document.createElement('canvas'); signCanvas.width = 1024; signCanvas.height = 256;
+    const sg = signCanvas.getContext('2d')!;
+    sg.fillStyle = '#102234'; sg.fillRect(0, 0, 1024, 256);
+    sg.fillStyle = '#3dd7e8'; sg.fillRect(0, 0, 1024, 9); sg.fillRect(0, 247, 1024, 9);
+    sg.textAlign = 'center'; sg.fillStyle = '#eaf8ff'; sg.font = 'bold 52px Arial';
+    const fastX = sc.side > 0 ? 770 : 254, normalX = sc.side > 0 ? 254 : 770;
+    sg.fillText('JALUR BIASA', normalX, 97);
+    sg.fillStyle = '#6df0ff'; sg.fillText('SHORTCUT', fastX, 97);
+    sg.font = 'bold 70px Arial'; sg.fillText(sc.side > 0 ? '>>>' : '<<<', fastX, 193);
+    sg.fillStyle = '#c1d5e4'; sg.fillText('^', normalX, 193);
+    const signTexture = new THREE.CanvasTexture(signCanvas); signTexture.colorSpace = THREE.SRGBColorSpace;
+    const gantryMat = new THREE.MeshStandardMaterial({ color: 0x263746, metalness: 0.45, roughness: 0.48 });
+    const gantry = new THREE.Group();
+    for (const x of [-HW - 2, HW + 2]) {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.8, 12, 0.8), gantryMat);
+      post.position.set(x, 6, 0); gantry.add(post);
+    }
+    const board = new THREE.Mesh(new THREE.PlaneGeometry(43, 5), new THREE.MeshBasicMaterial({ map: signTexture, side: THREE.DoubleSide }));
+    board.rotation.y = Math.PI;
+    board.position.set(0, 10.5, 0); gantry.add(board);
+    this.frameAt(sc.start - 80, frame);
+    orientToFrame(gantry, frame);
+    this.group.add(gantry);
+  }
+
+  rampOffset(s: number) {
+    return ((this.wrap(s) - this.rampS + this.L * 1.5) % this.L) - this.L / 2;
+  }
+
+  private rampMesh() {
+    const positions: number[] = [], uvs: number[] = [], indices: number[] = [];
+    const segments = 44;
+    for (let i = 0; i <= segments; i++) {
+      const d = -RAMP_APPROACH + RAMP_APPROACH * i / segments;
+      this.frameAt(this.rampS + d, this._f);
+      for (const side of [-1, 1]) {
+        const v = this._f.pos.clone().addScaledVector(this._f.r, side * (HW - 2)).addScaledVector(this._f.u, 0.08);
+        positions.push(v.x, v.y, v.z); uvs.push(side < 0 ? 0 : 1, i / segments);
+      }
+      if (i < segments) { const j = i * 2; indices.push(j, j + 1, j + 2, j + 1, j + 3, j + 2); }
+    }
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geometry.setIndex(indices); geometry.computeVertexNormals();
+    const canvas = document.createElement('canvas'); canvas.width = 512; canvas.height = 512;
+    const g = canvas.getContext('2d')!;
+    g.fillStyle = '#24384b'; g.fillRect(0, 0, 512, 512);
+    g.fillStyle = '#51d3eb'; g.fillRect(5, 0, 8, 512); g.fillRect(499, 0, 8, 512);
+    g.strokeStyle = '#90ecff'; g.lineWidth = 12; g.lineJoin = 'round';
+    for (const y of [120, 250, 380]) {
+      g.beginPath(); g.moveTo(165, y + 38); g.lineTo(256, y - 25); g.lineTo(347, y + 38); g.stroke();
+    }
+    const texture = new THREE.CanvasTexture(canvas); texture.colorSpace = THREE.SRGBColorSpace;
+    const mat = new THREE.MeshPhysicalMaterial({ map: texture, metalness: 0.35, roughness: 0.42, clearcoat: 0.35, side: THREE.DoubleSide });
+    const mesh = new THREE.Mesh(geometry, mat); mesh.receiveShadow = true; return mesh;
+  }
+
   /** true when [s-half, s+half] is clear of loop / inverted sections */
   flat(s: number, half: number) {
     for (let d = -half; d <= half; d += this.ds * 2) {
       const i = Math.floor(this.wrap(s + d) / this.ds) % this.N;
-      if (this.bad[i]) return false;
+      if (this.bad[i] || (this.rampReady && this.rampOffset(s + d) > -12 && this.rampOffset(s + d) < this.rampGap + 12)) return false;
     }
     return true;
   }
@@ -478,6 +730,13 @@ export class Track {
         }
       }
       for (let i = 0; i < N; i++) {
+        const offset = this.rampOffset((i + 0.5) * this.ds);
+        if (offset > 0 && offset < this.rampGap) continue;
+        // Leave an opening in the outer rail at the branch and rejoin.
+        const sc = this.shortcut;
+        const lateralMid = (x0 + x1) * 0.5;
+        const ss = (i + 0.5) * this.ds;
+        if (sc && lateralMid * sc.side > HW - 2.8 && (Math.abs(ss - sc.start) < 100 || Math.abs(ss - (sc.start + sc.span)) < 100)) continue;
         const a = base + i * 2;
         indices.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
       }
@@ -523,12 +782,18 @@ export class Track {
   private buildMesh(aniso: number) {
     const roadTex = roadTexture(aniso);
     const wallTex = wallTexture(aniso);
+    const surfaceTex = roadSurfaceTexture(aniso);
 
-    const roadMat = new THREE.MeshStandardMaterial({
+    const roadMat = new THREE.MeshPhysicalMaterial({
       map: roadTex,
+      bumpMap: surfaceTex,
+      bumpScale: 0.065,
+      roughnessMap: surfaceTex,
       roughness: 0.62,
       metalness: 0.3,
-      envMapIntensity: 0.8,
+      envMapIntensity: 0.85,
+      clearcoat: 0.12,
+      clearcoatRoughness: 0.45,
       side: THREE.DoubleSide,
     });
     this.roadMaterial = roadMat;
@@ -588,9 +853,9 @@ export class Track {
 
     // emissive light strips
     const stripMat = new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide, toneMapped: false });
-    const cyan = new THREE.Color(0.15, 0.9, 2.1);
+    const cyan = new THREE.Color(0.12, 0.65, 1.3);
     const cyanDim = new THREE.Color(0.08, 0.32, 0.8);
-    const amber = new THREE.Color(2.2, 0.8, 0.12);
+    const amber = new THREE.Color(1.3, 0.55, 0.1);
     const amberDim = new THREE.Color(0.8, 0.28, 0.06);
     const mk = (a: THREE.Color, b: THREE.Color) => (i: number) => (Math.floor(i / 10) % 3 === 0 ? b : a);
     const wallStripL = new THREE.Mesh(
@@ -636,12 +901,16 @@ export class Track {
       toneMapped: false,
       side: THREE.DoubleSide,
     });
-    padMat.color.setRGB(2.4, 2.1, 1.2);
+    padMat.color.setRGB(1.5, 1.3, 0.8);
     for (const pd of this.pads) {
       const m = new THREE.Mesh(this.patch(pd.s, PAD_HALF_LEN, pd.lat, PAD_HALF_WID, 0.08), padMat);
       m.renderOrder = 2;
       this.group.add(m);
     }
+
+    // Full-width air ramp, built into a safe section of each circuit.
+    this.group.add(this.rampMesh());
+    this.buildShortcut();
 
     // start line
     const lineMat = new THREE.MeshBasicMaterial({ map: checkerTexture(), side: THREE.DoubleSide });

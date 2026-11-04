@@ -38,7 +38,7 @@ void main(){
   float sd = max(dot(d, uSun), 0.0);
   col += vec3(1.0, 0.85, 0.6) * pow(sd, 6.0) * 0.10;
   col += vec3(1.0, 0.88, 0.7) * pow(sd, 48.0) * 0.45;
-  col += vec3(1.0, 0.94, 0.85) * smoothstep(0.99935, 0.9998, sd) * 14.0;
+  col += vec3(1.0, 0.94, 0.85) * smoothstep(0.99935, 0.9998, sd) * 5.0;
 
   if(h > 0.0){
     vec2 uv = d.xz / (h + 0.18);
